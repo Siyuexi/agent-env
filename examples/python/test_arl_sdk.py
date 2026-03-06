@@ -243,7 +243,7 @@ def test_basic_execution(gateway_url: str, pool_name: str, verbose: bool) -> tup
                     ],
                 },
                 {"name": "run_file", "command": ["sh", "/workspace/hello.sh"]},
-                {"name": "apt", "command": ["apt", "--help"]},
+                {"name": "whoami", "command": ["whoami"]},
             ]
         )
 
@@ -394,7 +394,7 @@ def test_history_trajectory(gateway_url: str, pool_name: str, verbose: bool) -> 
 
 
 def test_tool_provisioning(
-    pool_mgr: WarmPoolManager, gateway_url: str, verbose: bool
+    pool_mgr: WarmPoolManager, gateway_url: str, verbose: bool, pool_image: str = "ubuntu:22.04"
 ) -> tuple[bool, float]:
     """Test 6: Tool provisioning and calling."""
     start = time.time()
@@ -430,7 +430,7 @@ def test_tool_provisioning(
     try:
         pool_mgr.create_warmpool(
             name=TOOLS_POOL_NAME,
-            image="pair-diag-cn-guangzhou.cr.volces.com/pair/ubuntu:22.04",
+            image=pool_image,
             replicas=1,
             tools=tools,
         )

@@ -80,6 +80,14 @@ profiles:
           sidecar.image.repository: 10.10.10.240/library/arl-sidecar
           gateway.image.repository: 10.10.10.240/library/arl-gateway
           executorAgent.image.repository: 10.10.10.240/library/arl-executor-agent
+          metrics.serviceMonitor.enabled: "false"
+          gateway.service.type: NodePort
+          gateway.service.nodePort: "30076"
+          # Monitoring
+          prometheus.enabled: "true"
+          prometheus.image: prom/prometheus:v3.10.0
+          grafana.enabled: "true"
+          grafana.image: grafana/grafana:12.3.1
         setValueTemplates:
           image.tag: "{{.IMAGE_TAG}}"
           sidecar.image.tag: "{{.IMAGE_TAG2}}"

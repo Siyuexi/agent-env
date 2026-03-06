@@ -33,6 +33,9 @@ gateway:
     tag: "latest"
   port: 8080
   sidecarGrpcPort: 9090
+  service:
+    type: ClusterIP
+    nodePort: ""  # e.g. 30080, only used when type is NodePort
   serviceAccount:
     name: ""
   resources:
