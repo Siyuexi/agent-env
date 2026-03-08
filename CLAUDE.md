@@ -10,6 +10,7 @@ ARL-Infra is a Kubernetes Operator for Agentic Reinforcement Learning environmen
 - **WarmPool**: Maintains a pool of pre-started pods ready for immediate allocation. Supports ToolsSpec for pre-provisioning tools in executor containers.
 - **Sandbox**: An isolated workspace bound to a pod from a warm pool
 - **Gateway**: REST API service that manages sessions and forwards execution to sidecar gRPC. Replaces the old Task CRD approach.
+- **Managed Sessions**: High-level API where clients specify only `image` + `experimentId`; the server automatically manages pool lifecycle (creation, scaling, GC).
 - **Sidecar**: gRPC service running in each pod, handling file operations and command execution
 - **Executor Agent**: Lightweight agent running inside the executor container, receiving commands from sidecar via Unix socket
 
@@ -128,6 +129,7 @@ pkg/
 │   ├── gateway.go         # Session/execution logic
 │   ├── router.go          # HTTP route handlers
 │   ├── types.go           # Request/response types
+│   ├── pool_manager.go    # Managed pool auto-scaling (PoolManager)
 │   ├── history.go         # Step history tracking
 │   └── ws_shell.go        # WebSocket shell handler
 ├── execagent/             # Executor agent (runs inside executor container)
@@ -164,6 +166,14 @@ charts/arl-operator/       # Helm chart for deployment
 2. **Sandbox** allocates a pod from the pool (phase: Pending -> Bound -> Ready -> Failed)
 3. **Gateway** receives execution requests via REST API and forwards them to the sidecar gRPC service. No Task CRD is created; execution is synchronous.
 
+**Managed Sessions** provide an alternative, simplified flow:
+
+1. Client sends `POST /v1/managed/sessions` with `image` + `experimentId`
+2. **PoolManager** auto-creates a WarmPool if none exists for the image, or scales up if no idle pods
+3. A Sandbox is allocated from the managed pool (same as above)
+4. Client uses the session normally (execute, restore, shell, etc.)
+5. On session deletion, PoolManager decrements demand; background sweep handles scale-down and pool GC
+
 ### Gateway
 
 The Gateway (port 8080) provides a REST API for session and execution management. It replaces the old Task controller by directly calling sidecar gRPC.
@@ -184,6 +194,9 @@ The Gateway (port 8080) provides a REST API for session and execution management
 | GET | `/v1/pools/{name}` | Get pool status |
 | PATCH | `/v1/pools/{name}` | Scale a pool (update replicas and resources) |
 | DELETE | `/v1/pools/{name}` | Delete a pool |
+| POST | `/v1/managed/sessions` | Create a managed session (image + experimentId, auto pool) |
+| GET | `/v1/managed/experiments/{id}/sessions` | List all sessions for an experiment |
+| DELETE | `/v1/managed/experiments/{id}` | Batch-delete all sessions for an experiment |
 | GET | `/healthz` | Health check |
 | GET | `/metrics` | Prometheus metrics endpoint |
 
@@ -192,6 +205,7 @@ The Gateway (port 8080) provides a REST API for session and execution management
 - Per-step snapshot IDs for restore/rollback
 - Step history tracking for trajectory export
 - Pool health checks before session creation
+- **Managed sessions**: server-side pool auto-scaling with demand-based scale-up, cooldown scale-down, and empty pool GC
 - HTTP proxy support (respects `http_proxy`/`HTTP_PROXY` env vars)
 - Prometheus metrics for monitoring (sessions, steps, pool utilization, pod lifecycle)
 
@@ -251,6 +265,26 @@ The `ImageScheduler` provides image-locality-aware pod scheduling using Rendezvo
 
 Note: Execution is handled by the Gateway, not by a controller. There is no TaskController or TTLController.
 
+### Managed Pool Auto-Scaling (PoolManager)
+
+The PoolManager runs inside the Gateway process and automatically manages WarmPools for the managed sessions API.
+
+**Behavior:**
+- **Auto-create**: First `POST /v1/managed/sessions` for an image creates a WarmPool (named `managed-<sha256(namespace/image)[:12]>`)
+- **Scale-up**: When no idle pods available, scales replicas based on active session count + 1 spare
+- **Scale-down**: Background sweep (every `MANAGED_POOL_SWEEP_INTERVAL`) reduces replicas after `MANAGED_POOL_IDLE_COOLDOWN`
+- **GC**: Deletes empty pools (0 sessions) after `MANAGED_POOL_EMPTY_TTL`
+- **Recovery**: On gateway restart, rebuilds state from K8s CRDs with `arl.infra.io/managed=true` label
+
+**Configuration** via environment variables:
+- `MANAGED_POOL_INITIAL_REPLICAS`: Starting replicas for new pools (default: 2)
+- `MANAGED_POOL_MIN_REPLICAS`: Scale-down floor (default: 0)
+- `MANAGED_POOL_MAX_REPLICAS`: Scale-up ceiling (default: 50)
+- `MANAGED_POOL_SCALE_UP_STEP`: Minimum replicas added per scale-up (default: 2)
+- `MANAGED_POOL_IDLE_COOLDOWN`: Duration before scale-down (default: 5m)
+- `MANAGED_POOL_EMPTY_TTL`: Duration to keep empty pools (default: 10m)
+- `MANAGED_POOL_SWEEP_INTERVAL`: Background sweep interval (default: 30s)
+
 ## Monitoring & Observability
 
 The system includes comprehensive Prometheus metrics and Grafana dashboards:
@@ -306,6 +340,58 @@ The system includes comprehensive Prometheus metrics and Grafana dashboards:
 The SDK communicates with the Gateway REST API via `GatewayClient`. No direct Kubernetes API calls.
 
 **HTTP Proxy Support**: The SDK respects standard `http_proxy` and `HTTP_PROXY` environment variables for proxy configuration.
+
+### Managed Sessions (Recommended)
+
+The simplest way to use ARL. No pool management needed — just specify image and experiment ID:
+
+```python
+from arl import ManagedSession
+
+# Server automatically creates/scales pools
+with ManagedSession(image="python:3.11-slim", experiment_id="swe-bench-42") as session:
+    result = session.execute([
+        {"name": "hello", "command": ["echo", "Hello, World!"]},
+        {"name": "install", "command": ["pip", "install", "requests"]},
+    ])
+    print(result.results[0].output.stdout)       # "Hello, World!\n"
+    print(result.results[0].snapshot_id)          # snapshot ID for restore
+    print(result.total_duration_ms)               # total execution time
+# Session automatically cleaned up on exit
+
+# With custom resources (applied on first pool creation for this image)
+from arl import ResourceRequirements
+with ManagedSession(
+    image="python:3.11-slim",
+    experiment_id="swe-bench-42",
+    resources=ResourceRequirements(
+        requests={"cpu": "500m", "memory": "512Mi"},
+        limits={"cpu": "2", "memory": "2Gi"},
+    ),
+) as session:
+    session.execute([{"name": "test", "command": ["python", "-c", "print(1)"]}])
+```
+
+### Experiment Management
+
+```python
+from arl import GatewayClient
+
+client = GatewayClient(base_url="http://localhost:8080")
+
+# List all sessions in an experiment
+sessions = client.list_experiment_sessions("swe-bench-42")
+for s in sessions:
+    print(f"{s.id}: {s.pod_name}")
+
+# Batch-delete all sessions for an experiment
+deleted = client.delete_experiment("swe-bench-42")
+print(f"Deleted {deleted} sessions")
+```
+
+### Manual Pool Management
+
+For advanced use cases where you need direct control over pool lifecycle:
 
 ```python
 from arl import SandboxSession, GatewayClient
@@ -435,6 +521,7 @@ See `examples/frontend/interactive_shell.html` for complete example.
 - `pkg/gateway/gateway.go` - Gateway session/execution logic
 - `pkg/gateway/router.go` - Gateway HTTP route handlers
 - `pkg/gateway/types.go` - Gateway request/response types
+- `pkg/gateway/pool_manager.go` - Managed pool auto-scaling (PoolManager)
 - `cmd/gateway/main.go` - Gateway entry point
 - `pkg/execagent/agent.go` - Executor agent (Unix socket server)
 - `pkg/execagent/protocol.go` - Executor agent JSON protocol
@@ -442,7 +529,7 @@ See `examples/frontend/interactive_shell.html` for complete example.
 - `pkg/scheduler/image_scheduler.go` - Image-locality aware scheduler
 - `pkg/scheduler/rendezvous.go` - Rendezvous (HRW) hashing
 - `sdk/python/arl/arl/gateway_client.py` - Python SDK Gateway HTTP client
-- `sdk/python/arl/arl/session.py` - Python SDK SandboxSession
+- `sdk/python/arl/arl/session.py` - Python SDK SandboxSession and ManagedSession
 - `sdk/python/arl/arl/types.py` - Python SDK Pydantic models
 - `architecture/*.yaml` - Component catalog, dependencies, propagation rules
 - `pyproject.toml` - Python workspace configuration

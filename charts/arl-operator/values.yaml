@@ -46,6 +46,16 @@ gateway:
       cpu: 100m
       memory: 128Mi
 
+# Managed pool auto-scaling configuration (for POST /v1/managed/sessions)
+managedPool:
+  initialReplicas: 2       # Starting replicas when pool is first created
+  minReplicas: 0           # Scale-down floor
+  maxReplicas: 50          # Scale-up ceiling
+  scaleUpStep: 2           # Minimum replicas added per scale-up event
+  idleCooldown: "5m"       # How long excess idle pods must persist before scale-down
+  emptyTTL: "10m"          # How long to keep a pool with 0 sessions before deletion
+  sweepInterval: "30s"     # Background sweep interval for scale-down and GC
+
 imagePullSecrets: []
 nameOverride: ""
 fullnameOverride: ""
