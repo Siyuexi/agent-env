@@ -87,7 +87,20 @@ func main() {
 		}
 	}
 
-	gw := gateway.New(k8sClient, sidecarClient, metrics.NewPrometheusCollector(), trajectoryWriter)
+	gw := gateway.New(k8sClient, sidecarClient, metrics.NewPrometheusCollector(), trajectoryWriter, &gateway.PoolManagerConfig{
+		InitialReplicas: cfg.ManagedPoolInitialReplicas,
+		MinReplicas:     cfg.ManagedPoolMinReplicas,
+		MaxReplicas:     cfg.ManagedPoolMaxReplicas,
+		ScaleUpStep:     cfg.ManagedPoolScaleUpStep,
+		IdleCooldown:    cfg.ManagedPoolIdleCooldown,
+		EmptyPoolTTL:    cfg.ManagedPoolEmptyTTL,
+		SweepInterval:   cfg.ManagedPoolSweepInterval,
+	})
+
+	// Recover and start pool manager
+	if err := gw.StartPoolManager(context.Background()); err != nil {
+		log.Printf("Warning: pool manager recovery failed: %v (managed sessions disabled until first request)", err)
+	}
 
 	mux := http.NewServeMux()
 	gateway.SetupRoutes(mux, gw)
@@ -117,6 +130,7 @@ func main() {
 	defer cancel()
 
 	server.Shutdown(shutdownCtx)
+	gw.StopPoolManager()
 	sidecarClient.Close()
 	if trajectoryWriter != nil {
 		trajectoryWriter.Close()

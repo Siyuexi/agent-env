@@ -10,6 +10,7 @@ import httpx
 from arl.types import (
     ErrorResponse,
     ExecuteResponse,
+    ManagedSessionInfo,
     PoolCondition,
     PoolInfo,
     ResourceRequirements,
@@ -213,6 +214,83 @@ class GatewayClient:
         resp = self._client.patch(f"/v1/pools/{name}", json=body)
         self._handle_error(resp)
         return PoolInfo.model_validate(resp.json())
+
+    # --- Managed Session APIs ---
+
+    def create_managed_session(
+        self,
+        image: str,
+        experiment_id: str,
+        namespace: str = "default",
+        resources: ResourceRequirements | None = None,
+        tools: ToolsSpec | None = None,
+        workspace_dir: str = "/workspace",
+    ) -> ManagedSessionInfo:
+        """Create a managed session with automatic pool management.
+
+        The server automatically creates and scales WarmPools. Just specify
+        the image and experiment ID.
+
+        Args:
+            image: Container image for the executor.
+            experiment_id: Experiment identifier for grouping and management.
+            namespace: Kubernetes namespace.
+            resources: Optional CPU/memory requirements (used on first pool creation).
+            tools: Optional tools specification (used on first pool creation).
+            workspace_dir: Workspace mount path.
+
+        Returns:
+            ManagedSessionInfo with session details and experiment metadata.
+        """
+        body: dict[str, Any] = {
+            "image": image,
+            "experimentId": experiment_id,
+            "namespace": namespace,
+            "workspaceDir": workspace_dir,
+        }
+        if resources is not None:
+            body["resources"] = resources.model_dump(exclude_none=True)
+        if tools is not None:
+            body["tools"] = tools.model_dump(by_alias=True, exclude_none=True)
+        resp = self._client.post("/v1/managed/sessions", json=body)
+        self._handle_error(resp)
+        return ManagedSessionInfo.model_validate(resp.json())
+
+    def list_experiment_sessions(
+        self,
+        experiment_id: str,
+    ) -> list[ManagedSessionInfo]:
+        """List all active sessions for an experiment.
+
+        Args:
+            experiment_id: Experiment identifier.
+
+        Returns:
+            List of ManagedSessionInfo for the experiment.
+        """
+        resp = self._client.get(f"/v1/managed/experiments/{experiment_id}/sessions")
+        self._handle_error(resp)
+        data = resp.json()
+        if isinstance(data, list):
+            return [ManagedSessionInfo.model_validate(item) for item in data]
+        return []
+
+    def delete_experiment(
+        self,
+        experiment_id: str,
+    ) -> int:
+        """Delete all sessions for an experiment.
+
+        Args:
+            experiment_id: Experiment identifier.
+
+        Returns:
+            Number of sessions deleted.
+        """
+        resp = self._client.delete(f"/v1/managed/experiments/{experiment_id}")
+        self._handle_error(resp)
+        data = resp.json()
+        return int(data.get("deleted", 0))
 
     # --- Health ---
 

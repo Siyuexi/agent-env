@@ -215,9 +215,67 @@
     {
       "datasource": { "type": "prometheus", "uid": "arl-prometheus" },
       "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "thresholds" },
+          "thresholds": { "mode": "absolute", "steps": [
+            { "color": "green", "value": null },
+            { "color": "orange", "value": 10 },
+            { "color": "red", "value": 50 }
+          ]},
+          "unit": "ops"
+        }
+      },
+      "gridPos": { "h": 4, "w": 6, "x": 0, "y": 39 },
+      "id": 30,
+      "options": { "colorMode": "background", "graphMode": "area", "reduceOptions": { "calcs": ["lastNotNull"] } },
+      "targets": [{ "datasource": { "type": "prometheus", "uid": "arl-prometheus" }, "expr": "sum(rate(workqueue_retries_total{name=\"sandbox\"}[5m]))", "legendFormat": "retry rate" }],
+      "title": "Sandbox Retry Rate",
+      "type": "stat"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "arl-prometheus" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "thresholds" },
+          "thresholds": { "mode": "absolute", "steps": [
+            { "color": "green", "value": null },
+            { "color": "orange", "value": 0.5 },
+            { "color": "red", "value": 0.9 }
+          ]},
+          "unit": "percentunit",
+          "min": 0,
+          "max": 1
+        }
+      },
+      "gridPos": { "h": 4, "w": 6, "x": 6, "y": 39 },
+      "id": 31,
+      "options": { "colorMode": "background", "graphMode": "area", "reduceOptions": { "calcs": ["lastNotNull"] } },
+      "targets": [{ "datasource": { "type": "prometheus", "uid": "arl-prometheus" }, "expr": "sum(rate(workqueue_retries_total{name=\"sandbox\"}[5m])) / clamp_min(sum(rate(workqueue_adds_total{name=\"sandbox\"}[5m])), 1)", "legendFormat": "ratio" }],
+      "title": "Sandbox Retry Ratio",
+      "type": "stat"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "arl-prometheus" },
+      "fieldConfig": {
+        "defaults": { "color": { "mode": "palette-classic" }, "unit": "ops", "custom": { "lineWidth": 2, "fillOpacity": 15 } }
+      },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 39 },
+      "id": 32,
+      "options": { "tooltip": { "mode": "multi" }, "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["lastNotNull", "max"] } },
+      "targets": [
+        { "datasource": { "type": "prometheus", "uid": "arl-prometheus" }, "expr": "sum(rate(workqueue_adds_total{name=\"sandbox\"}[5m]))", "legendFormat": "adds" },
+        { "datasource": { "type": "prometheus", "uid": "arl-prometheus" }, "expr": "sum(rate(workqueue_retries_total{name=\"sandbox\"}[5m]))", "legendFormat": "retries" },
+        { "datasource": { "type": "prometheus", "uid": "arl-prometheus" }, "expr": "sum(rate(workqueue_adds_total{name=\"sandbox\"}[5m])) - sum(rate(workqueue_retries_total{name=\"sandbox\"}[5m]))", "legendFormat": "new events (adds - retries)" }
+      ],
+      "title": "Sandbox Workqueue: Adds vs Retries",
+      "type": "timeseries"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "arl-prometheus" },
+      "fieldConfig": {
         "defaults": { "color": { "mode": "palette-classic" }, "unit": "s", "custom": { "lineWidth": 2, "fillOpacity": 10 } }
       },
-      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 39 },
+      "gridPos": { "h": 4, "w": 12, "x": 0, "y": 43 },
       "id": 11,
       "options": { "tooltip": { "mode": "multi" }, "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["lastNotNull", "mean"] } },
       "targets": [
@@ -233,7 +291,7 @@
       "fieldConfig": {
         "defaults": { "color": { "mode": "palette-classic" }, "unit": "ops", "custom": { "lineWidth": 2, "fillOpacity": 10 } }
       },
-      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 39 },
+      "gridPos": { "h": 4, "w": 12, "x": 12, "y": 47 },
       "id": 12,
       "options": { "tooltip": { "mode": "multi" }, "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["lastNotNull"] } },
       "targets": [

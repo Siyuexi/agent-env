@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -28,9 +29,11 @@ import (
 
 // session holds internal session state.
 type session struct {
-	mu      sync.RWMutex
-	Info    SessionInfo
-	History *StepHistory
+	mu           sync.RWMutex
+	Info         SessionInfo
+	History      *StepHistory
+	managed      bool
+	experimentID string
 }
 
 // Gateway manages sessions and forwards execution to sidecars.
@@ -43,16 +46,40 @@ type Gateway struct {
 	sessionCount     atomic.Int64
 	lastTouchMu      sync.Mutex
 	lastTouchTime    map[string]time.Time // sandboxName → last K8s update time
+	poolManager      *PoolManager
 }
 
 // New creates a new gateway. metrics and trajectoryWriter may be nil.
-func New(k8sClient client.Client, sidecarClient interfaces.SidecarClient, metrics interfaces.MetricsCollector, trajectoryWriter *audit.TrajectoryWriter) *Gateway {
-	return &Gateway{
+func New(k8sClient client.Client, sidecarClient interfaces.SidecarClient, metrics interfaces.MetricsCollector, trajectoryWriter *audit.TrajectoryWriter, pmConfig *PoolManagerConfig) *Gateway {
+	gw := &Gateway{
 		k8sClient:        k8sClient,
 		sidecarClient:    sidecarClient,
 		metrics:          metrics,
 		trajectoryWriter: trajectoryWriter,
 		lastTouchTime:    make(map[string]time.Time),
+	}
+	if pmConfig != nil {
+		gw.poolManager = NewPoolManager(k8sClient, *pmConfig)
+	}
+	return gw
+}
+
+// StartPoolManager starts the pool manager background goroutine and recovers state.
+func (g *Gateway) StartPoolManager(ctx context.Context) error {
+	if g.poolManager == nil {
+		return nil
+	}
+	if err := g.poolManager.Recover(ctx); err != nil {
+		return fmt.Errorf("recover pool manager: %w", err)
+	}
+	g.poolManager.Start()
+	return nil
+}
+
+// StopPoolManager stops the pool manager background goroutine.
+func (g *Gateway) StopPoolManager() {
+	if g.poolManager != nil {
+		g.poolManager.Stop()
 	}
 }
 
@@ -71,13 +98,18 @@ func (g *Gateway) CreateSession(ctx context.Context, req CreateSessionRequest) (
 	sessionID := fmt.Sprintf("gw-%d-%s", time.Now().UnixMilli(), randomSuffix(4))
 	sandboxName := sessionID
 
+	labels := map[string]string{
+		"arl.infra.io/pool": req.PoolRef,
+	}
+	for k, v := range req.ExtraLabels {
+		labels[k] = v
+	}
+
 	sandbox := &arlv1alpha1.Sandbox{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      sandboxName,
 			Namespace: ns,
-			Labels: map[string]string{
-				"arl.infra.io/pool": req.PoolRef,
-			},
+			Labels:    labels,
 		},
 		Spec: arlv1alpha1.SandboxSpec{
 			PoolRef:   req.PoolRef,
@@ -180,6 +212,8 @@ func (g *Gateway) DeleteSession(ctx context.Context, sessionID string) error {
 	s.mu.RLock()
 	sandboxName := s.Info.SandboxName
 	namespace := s.Info.Namespace
+	poolRef := s.Info.PoolRef
+	managed := s.managed
 	s.mu.RUnlock()
 
 	sandbox := &arlv1alpha1.Sandbox{
@@ -201,6 +235,11 @@ func (g *Gateway) DeleteSession(ctx context.Context, sessionID string) error {
 
 	if g.metrics != nil {
 		g.metrics.SetActiveSessions(g.sessionCount.Add(-1))
+	}
+
+	// Release from pool manager if managed
+	if managed && g.poolManager != nil {
+		g.poolManager.ReleaseSession(poolRef)
 	}
 
 	return nil
@@ -727,4 +766,124 @@ func randomSuffix(n int) string {
 	b := make([]byte, n)
 	_, _ = rand.Read(b)
 	return hex.EncodeToString(b)
+}
+
+// validLabelValue validates a Kubernetes label value (max 63 chars, alphanumeric/dash/underscore/dot).
+var validLabelValue = regexp.MustCompile(`^[a-zA-Z0-9]([a-zA-Z0-9._-]{0,61}[a-zA-Z0-9])?$`)
+
+// CreateManagedSession creates a session with automatic pool management.
+func (g *Gateway) CreateManagedSession(ctx context.Context, req CreateManagedSessionRequest) (*ManagedSessionInfo, error) {
+	if g.poolManager == nil {
+		return nil, fmt.Errorf("pool manager not configured")
+	}
+
+	if !validLabelValue.MatchString(req.ExperimentID) {
+		return nil, fmt.Errorf("experimentId must be a valid Kubernetes label value (max 63 chars, alphanumeric/dash/underscore/dot, must start and end with alphanumeric)")
+	}
+
+	ns := req.Namespace
+	if ns == "" {
+		ns = "default"
+	}
+
+	poolName, err := g.poolManager.AcquireSession(ctx, req)
+	if err != nil {
+		return nil, fmt.Errorf("acquire pool: %w", err)
+	}
+
+	// Create session using existing logic, with experiment labels pre-applied
+	info, err := g.CreateSession(ctx, CreateSessionRequest{
+		PoolRef:   poolName,
+		Namespace: ns,
+		ExtraLabels: map[string]string{
+			labelManaged:    "true",
+			labelExperiment: req.ExperimentID,
+		},
+	})
+	if err != nil {
+		// Release the acquired slot since session creation failed
+		g.poolManager.ReleaseSession(poolName)
+		return nil, fmt.Errorf("create session: %w", err)
+	}
+
+	// Mark the session as managed
+	val, ok := g.sessions.Load(info.ID)
+	if ok {
+		s := val.(*session)
+		s.mu.Lock()
+		s.managed = true
+		s.experimentID = req.ExperimentID
+		s.mu.Unlock()
+	}
+
+	return &ManagedSessionInfo{
+		SessionInfo:  *info,
+		ExperimentID: req.ExperimentID,
+		Managed:      true,
+	}, nil
+}
+
+// ListExperimentSessions returns all active sessions for an experiment.
+func (g *Gateway) ListExperimentSessions(experimentID string) []ManagedSessionInfo {
+	results := make([]ManagedSessionInfo, 0)
+	g.sessions.Range(func(_, value any) bool {
+		s := value.(*session)
+		s.mu.RLock()
+		if s.managed && s.experimentID == experimentID {
+			results = append(results, ManagedSessionInfo{
+				SessionInfo:  s.Info,
+				ExperimentID: s.experimentID,
+				Managed:      true,
+			})
+		}
+		s.mu.RUnlock()
+		return true
+	})
+	return results
+}
+
+// DeleteExperiment deletes all sessions for an experiment.
+func (g *Gateway) DeleteExperiment(ctx context.Context, experimentID string) (int, error) {
+	sessions := g.ListExperimentSessions(experimentID)
+	deleted := 0
+	var lastErr error
+	for _, s := range sessions {
+		if err := g.DeleteSession(ctx, s.ID); err != nil {
+			lastErr = err
+			log.Printf("Warning: failed to delete session %s in experiment %s: %v", s.ID, experimentID, err)
+		} else {
+			deleted++
+		}
+	}
+
+	// Also clean up any orphaned sandboxes via label selector (in case Gateway lost track)
+	var sbList arlv1alpha1.SandboxList
+	if err := g.k8sClient.List(ctx, &sbList,
+		client.MatchingLabels{
+			labelManaged:    "true",
+			labelExperiment: experimentID,
+		}); err != nil {
+		log.Printf("Warning: failed to list orphaned sandboxes for experiment %s: %v", experimentID, err)
+	} else {
+		for i := range sbList.Items {
+			sb := &sbList.Items[i]
+			// Check if we already deleted it via session
+			alreadyDeleted := false
+			for _, s := range sessions {
+				if s.SandboxName == sb.Name {
+					alreadyDeleted = true
+					break
+				}
+			}
+			if !alreadyDeleted {
+				if err := g.k8sClient.Delete(ctx, sb); err != nil && !errors.IsNotFound(err) {
+					log.Printf("Warning: failed to delete orphaned sandbox %s: %v", sb.Name, err)
+				} else {
+					deleted++
+				}
+			}
+		}
+	}
+
+	return deleted, lastErr
 }

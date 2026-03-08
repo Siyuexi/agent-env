@@ -32,6 +32,11 @@ func SetupRoutes(mux *http.ServeMux, gw *Gateway) {
 	mux.HandleFunc("PATCH /v1/pools/{name}", handleScalePool(gw))
 	mux.HandleFunc("DELETE /v1/pools/{name}", handleDeletePool(gw))
 
+	// Managed sessions (high-level API)
+	mux.HandleFunc("POST /v1/managed/sessions", handleCreateManagedSession(gw))
+	mux.HandleFunc("GET /v1/managed/experiments/{id}/sessions", handleListExperimentSessions(gw))
+	mux.HandleFunc("DELETE /v1/managed/experiments/{id}", handleDeleteExperiment(gw))
+
 	// Health
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
@@ -245,4 +250,51 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 
 func writeError(w http.ResponseWriter, status int, msg string) {
 	writeJSON(w, status, ErrorResponse{Error: msg})
+}
+
+func handleCreateManagedSession(gw *Gateway) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		var req CreateManagedSessionRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+
+		if req.Image == "" {
+			writeError(w, http.StatusBadRequest, "image is required")
+			return
+		}
+		if req.ExperimentID == "" {
+			writeError(w, http.StatusBadRequest, "experimentId is required")
+			return
+		}
+
+		info, err := gw.CreateManagedSession(r.Context(), req)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+
+		writeJSON(w, http.StatusCreated, info)
+	}
+}
+
+func handleListExperimentSessions(gw *Gateway) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		id := r.PathValue("id")
+		sessions := gw.ListExperimentSessions(id)
+		writeJSON(w, http.StatusOK, sessions)
+	}
+}
+
+func handleDeleteExperiment(gw *Gateway) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		id := r.PathValue("id")
+		deleted, err := gw.DeleteExperiment(r.Context(), id)
+		resp := map[string]any{"deleted": deleted}
+		if err != nil {
+			resp["error"] = err.Error()
+		}
+		writeJSON(w, http.StatusOK, resp)
+	}
 }

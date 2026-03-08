@@ -9,14 +9,32 @@ import (
 	arlv1alpha1 "github.com/Lincyaw/agent-env/api/v1alpha1"
 )
 
+// ManagedSessionInfo extends SessionInfo with experiment metadata.
+type ManagedSessionInfo struct {
+	SessionInfo
+	ExperimentID string `json:"experimentId"`
+	Managed      bool   `json:"managed"`
+}
+
 // --- Request types ---
 
 // CreateSessionRequest is the body for POST /v1/sessions
 type CreateSessionRequest struct {
-	PoolRef            string `json:"poolRef"`
-	Namespace          string `json:"namespace,omitempty"`
-	KeepAlive          bool   `json:"keepAlive,omitempty"`
-	IdleTimeoutSeconds int    `json:"idleTimeoutSeconds,omitempty"`
+	PoolRef            string            `json:"poolRef"`
+	Namespace          string            `json:"namespace,omitempty"`
+	KeepAlive          bool              `json:"keepAlive,omitempty"`
+	IdleTimeoutSeconds int               `json:"idleTimeoutSeconds,omitempty"`
+	ExtraLabels        map[string]string `json:"-"` // internal use only, not exposed via JSON
+}
+
+// CreateManagedSessionRequest is the body for POST /v1/managed/sessions
+type CreateManagedSessionRequest struct {
+	Image        string                       `json:"image"`
+	ExperimentID string                       `json:"experimentId"`
+	Namespace    string                       `json:"namespace,omitempty"`
+	Resources    *corev1.ResourceRequirements `json:"resources,omitempty"`
+	Tools        *arlv1alpha1.ToolsSpec       `json:"tools,omitempty"`
+	WorkspaceDir string                       `json:"workspaceDir,omitempty"`
 }
 
 // ExecuteRequest is the body for POST /v1/sessions/{id}/execute

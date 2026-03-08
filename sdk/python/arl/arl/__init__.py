@@ -2,11 +2,12 @@
 
 from arl.gateway_client import GatewayClient, GatewayError, PoolNotReadyError
 from arl.interactive_shell_client import InteractiveShellClient, create_websocket_proxy
-from arl.session import SandboxSession
+from arl.session import ManagedSession, SandboxSession
 from arl.types import (
     ErrorResponse,
     ExecuteResponse,
     InlineToolSpec,
+    ManagedSessionInfo,
     PoolCondition,
     PoolInfo,
     ResourceRequirements,
@@ -33,6 +34,8 @@ __all__ = [
     "GatewayError",
     "InlineToolSpec",
     "InteractiveShellClient",
+    "ManagedSession",
+    "ManagedSessionInfo",
     "PoolCondition",
     "PoolInfo",
     "PoolNotReadyError",

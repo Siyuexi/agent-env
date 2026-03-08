@@ -10,10 +10,12 @@ from typing import Any
 from arl.gateway_client import GatewayClient
 from arl.types import (
     ExecuteResponse,
+    ResourceRequirements,
     SessionInfo,
     StepResult,
     ToolResult,
     ToolsRegistry,
+    ToolsSpec,
 )
 
 _SAFE_TOOL_NAME = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_.-]*$")
@@ -318,3 +320,86 @@ class SandboxSession:
                 self.delete_sandbox()
         finally:
             self.close()
+
+
+class ManagedSession(SandboxSession):
+    """Ultra-simple session that handles pools automatically.
+
+    Just specify image + experiment ID. Pool lifecycle is handled server-side.
+    No need to create or manage WarmPools manually.
+
+    Examples:
+        Basic usage with context manager:
+
+        >>> with ManagedSession(image="python:3.11-slim", experiment_id="my-exp") as s:
+        ...     result = s.execute([{"name": "hello", "command": ["echo", "hi"]}])
+        ...     print(result.results[0].output.stdout)
+
+        With custom resources:
+
+        >>> from arl import ResourceRequirements
+        >>> with ManagedSession(
+        ...     image="python:3.11-slim",
+        ...     experiment_id="my-exp",
+        ...     resources=ResourceRequirements(
+        ...         requests={"cpu": "500m", "memory": "512Mi"},
+        ...         limits={"cpu": "2", "memory": "2Gi"},
+        ...     ),
+        ... ) as s:
+        ...     result = s.execute([{"name": "test", "command": ["python", "-c", "print(1)"]}])
+
+        Batch cleanup by experiment:
+
+        >>> from arl import GatewayClient
+        >>> client = GatewayClient(base_url="http://localhost:8080")
+        >>> client.delete_experiment("my-exp")
+    """
+
+    def __init__(
+        self,
+        image: str,
+        experiment_id: str,
+        namespace: str = "default",
+        gateway_url: str = "http://localhost:8080",
+        timeout: float = 300.0,
+        resources: ResourceRequirements | None = None,
+        tools: ToolsSpec | None = None,
+        workspace_dir: str = "/workspace",
+    ) -> None:
+        super().__init__(
+            pool_ref="",  # will be set by server
+            namespace=namespace,
+            gateway_url=gateway_url,
+            keep_alive=False,
+            timeout=timeout,
+        )
+        self._image = image
+        self._experiment_id = experiment_id
+        self._resources = resources
+        self._tools = tools
+        self._workspace_dir = workspace_dir
+
+    @property
+    def experiment_id(self) -> str:
+        return self._experiment_id
+
+    def create_sandbox(self) -> SessionInfo:
+        """Create a managed session via the Gateway.
+
+        The server automatically handles pool creation and scaling.
+
+        Returns:
+            ManagedSessionInfo with session details.
+        """
+        info = self._client.create_managed_session(
+            image=self._image,
+            experiment_id=self._experiment_id,
+            namespace=self.namespace,
+            resources=self._resources,
+            tools=self._tools,
+            workspace_dir=self._workspace_dir,
+        )
+        self._session_id = info.id
+        self._session_info = info
+        self.pool_ref = info.pool_ref
+        return info

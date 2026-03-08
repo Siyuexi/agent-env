@@ -1,0 +1,442 @@
+package gateway
+
+import (
+	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"fmt"
+	"log"
+	"strings"
+	"sync"
+	"sync/atomic"
+	"time"
+
+	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/resource"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+
+	arlv1alpha1 "github.com/Lincyaw/agent-env/api/v1alpha1"
+)
+
+// PoolManagerConfig holds auto-scaling configuration for managed pools.
+type PoolManagerConfig struct {
+	// InitialReplicas is the starting replica count when a pool is first created.
+	InitialReplicas int32
+	// MinReplicas is the floor for scale-down.
+	MinReplicas int32
+	// MaxReplicas is the ceiling for scale-up.
+	MaxReplicas int32
+	// ScaleUpStep is how many replicas to add on each scale-up event.
+	ScaleUpStep int32
+	// IdleCooldown is how long a pool must have excess idle pods before scale-down.
+	IdleCooldown time.Duration
+	// EmptyPoolTTL is how long an empty pool (0 sessions) is kept before deletion.
+	EmptyPoolTTL time.Duration
+	// SweepInterval is how often the background goroutine checks for scale-down and GC.
+	SweepInterval time.Duration
+}
+
+// DefaultPoolManagerConfig returns sensible defaults.
+func DefaultPoolManagerConfig() PoolManagerConfig {
+	return PoolManagerConfig{
+		InitialReplicas: 2,
+		MinReplicas:     0,
+		MaxReplicas:     50,
+		ScaleUpStep:     2,
+		IdleCooldown:    5 * time.Minute,
+		EmptyPoolTTL:    10 * time.Minute,
+		SweepInterval:   30 * time.Second,
+	}
+}
+
+// poolState tracks per-pool metadata for managed pools.
+type poolState struct {
+	mu             sync.RWMutex
+	image          string
+	poolName       string
+	namespace      string
+	sessionCount   atomic.Int32
+	lastSessionEnd time.Time
+	idleSince      time.Time
+	createdAt      time.Time
+	resources      *corev1.ResourceRequirements
+	tools          *arlv1alpha1.ToolsSpec
+	workspaceDir   string
+}
+
+// PoolManager manages WarmPools automatically for the managed session API.
+type PoolManager struct {
+	k8sClient client.Client
+	config    PoolManagerConfig
+	pools     sync.Map // poolName → *poolState
+	stopCh    chan struct{}
+	wg        sync.WaitGroup
+}
+
+// NewPoolManager creates a new PoolManager.
+func NewPoolManager(k8sClient client.Client, config PoolManagerConfig) *PoolManager {
+	return &PoolManager{
+		k8sClient: k8sClient,
+		config:    config,
+		stopCh:    make(chan struct{}),
+	}
+}
+
+// Start launches the background sweep goroutine.
+func (pm *PoolManager) Start() {
+	pm.wg.Add(1)
+	go pm.sweepLoop()
+}
+
+// Stop signals the sweep goroutine to exit and waits for it.
+func (pm *PoolManager) Stop() {
+	close(pm.stopCh)
+	pm.wg.Wait()
+}
+
+// Recover rebuilds in-memory state from existing managed WarmPool CRDs on startup.
+func (pm *PoolManager) Recover(ctx context.Context) error {
+	var poolList arlv1alpha1.WarmPoolList
+	if err := pm.k8sClient.List(ctx, &poolList,
+		client.MatchingLabels{labelManaged: "true"}); err != nil {
+		return fmt.Errorf("list managed pools: %w", err)
+	}
+
+	for i := range poolList.Items {
+		pool := &poolList.Items[i]
+		image := pool.Annotations[annotationManagedImage]
+		if image == "" {
+			continue
+		}
+
+		state := &poolState{
+			image:     image,
+			poolName:  pool.Name,
+			namespace: pool.Namespace,
+			createdAt: pool.CreationTimestamp.Time,
+		}
+
+		// Restore resource/tools config from existing pool spec
+		if len(pool.Spec.Template.Spec.Containers) > 0 {
+			c := pool.Spec.Template.Spec.Containers[0]
+			state.resources = &c.Resources
+			if len(c.VolumeMounts) > 0 {
+				state.workspaceDir = c.VolumeMounts[0].MountPath
+			}
+		}
+		state.tools = pool.Spec.Tools
+
+		// Count active sandboxes for this pool (exclude Failed/terminated)
+		var sbList arlv1alpha1.SandboxList
+		if err := pm.k8sClient.List(ctx, &sbList,
+			client.InNamespace(pool.Namespace),
+			client.MatchingLabels{labelPool: pool.Name}); err != nil {
+			log.Printf("Warning: failed to list sandboxes for pool %s: %v", pool.Name, err)
+			continue
+		}
+		activeCount := int32(0)
+		for j := range sbList.Items {
+			if sbList.Items[j].Status.Phase != arlv1alpha1.SandboxPhaseFailed {
+				activeCount++
+			}
+		}
+		state.sessionCount.Store(activeCount)
+		if activeCount == 0 {
+			state.lastSessionEnd = time.Now()
+		}
+
+		pm.pools.Store(pool.Name, state)
+		log.Printf("Recovered managed pool %s (image=%s, sessions=%d)", pool.Name, image, len(sbList.Items))
+	}
+
+	return nil
+}
+
+const (
+	labelManaged           = "arl.infra.io/managed"
+	labelPool              = "arl.infra.io/pool"
+	labelExperiment        = "arl.infra.io/experiment"
+	annotationManagedImage = "arl.infra.io/managed-image"
+)
+
+// AcquireSession ensures a pool exists for the given image, scales up if needed,
+// and returns the pool name for session creation.
+func (pm *PoolManager) AcquireSession(ctx context.Context, req CreateManagedSessionRequest) (string, error) {
+	ns := req.Namespace
+	if ns == "" {
+		ns = "default"
+	}
+
+	image := normalizeImage(req.Image)
+	poolName := managedPoolName(image, ns)
+
+	newState := &poolState{
+		image:        image,
+		poolName:     poolName,
+		namespace:    ns,
+		createdAt:    time.Now(),
+		resources:    req.Resources,
+		tools:        req.Tools,
+		workspaceDir: req.WorkspaceDir,
+	}
+
+	actual, loaded := pm.pools.LoadOrStore(poolName, newState)
+	state := actual.(*poolState)
+
+	if !loaded {
+		// First request for this image: create the WarmPool CRD
+		if err := pm.createPool(ctx, state, ns); err != nil {
+			pm.pools.Delete(poolName)
+			return "", fmt.Errorf("create managed pool: %w", err)
+		}
+		log.Printf("Created managed pool %s for image %s", poolName, image)
+	}
+
+	// Increment BEFORE capacity check so concurrent calls see correct demand
+	state.sessionCount.Add(1)
+
+	// Check if we need to scale up
+	if err := pm.ensureCapacity(ctx, state, ns); err != nil {
+		state.sessionCount.Add(-1) // rollback on failure
+		return "", fmt.Errorf("ensure pool capacity: %w", err)
+	}
+
+	return poolName, nil
+}
+
+// ReleaseSession decrements the session count for a pool.
+func (pm *PoolManager) ReleaseSession(poolName string) {
+	val, ok := pm.pools.Load(poolName)
+	if !ok {
+		return
+	}
+	state := val.(*poolState)
+	for {
+		current := state.sessionCount.Load()
+		if current <= 0 {
+			return
+		}
+		if state.sessionCount.CompareAndSwap(current, current-1) {
+			if current-1 <= 0 {
+				state.mu.Lock()
+				state.lastSessionEnd = time.Now()
+				state.mu.Unlock()
+			}
+			return
+		}
+	}
+}
+
+// createPool creates a WarmPool CRD for a managed pool.
+func (pm *PoolManager) createPool(ctx context.Context, state *poolState, ns string) error {
+	resources := state.resources
+	if resources == nil {
+		resources = &corev1.ResourceRequirements{
+			Requests: corev1.ResourceList{
+				corev1.ResourceCPU:    resource.MustParse("100m"),
+				corev1.ResourceMemory: resource.MustParse("128Mi"),
+			},
+			Limits: corev1.ResourceList{
+				corev1.ResourceCPU:    resource.MustParse("1000m"),
+				corev1.ResourceMemory: resource.MustParse("1Gi"),
+			},
+		}
+	}
+
+	workspaceDir := state.workspaceDir
+	if workspaceDir == "" {
+		workspaceDir = "/workspace"
+	}
+
+	pool := &arlv1alpha1.WarmPool{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      state.poolName,
+			Namespace: ns,
+			Labels: map[string]string{
+				labelManaged: "true",
+			},
+			Annotations: map[string]string{
+				annotationManagedImage: state.image,
+			},
+		},
+		Spec: arlv1alpha1.WarmPoolSpec{
+			Replicas: pm.config.InitialReplicas,
+			Template: corev1.PodTemplateSpec{
+				Spec: corev1.PodSpec{
+					Containers: []corev1.Container{
+						{
+							Name:            "executor",
+							Image:           state.image,
+							ImagePullPolicy: corev1.PullIfNotPresent,
+							Command:         []string{"sh", "-c", "sleep infinity"},
+							Resources:       *resources,
+							VolumeMounts: []corev1.VolumeMount{
+								{Name: "workspace", MountPath: workspaceDir},
+							},
+						},
+					},
+				},
+			},
+			Tools: state.tools,
+		},
+	}
+
+	if err := pm.k8sClient.Create(ctx, pool); err != nil {
+		if errors.IsAlreadyExists(err) {
+			// Another goroutine or previous run created it; that's fine
+			return nil
+		}
+		return err
+	}
+	return nil
+}
+
+// ensureCapacity checks if the pool has idle pods and scales up if not.
+// Uses the current session count plus pending allocations to calculate the target,
+// so burst requests (e.g., 20 concurrent) scale up appropriately.
+func (pm *PoolManager) ensureCapacity(ctx context.Context, state *poolState, ns string) error {
+	pool := &arlv1alpha1.WarmPool{}
+	if err := pm.k8sClient.Get(ctx, types.NamespacedName{
+		Name: state.poolName, Namespace: ns,
+	}, pool); err != nil {
+		return fmt.Errorf("get pool %s: %w", state.poolName, err)
+	}
+
+	// Calculate demand: sessionCount already includes this request (incremented before call)
+	// Add 1 spare pod for responsiveness
+	demand := state.sessionCount.Load() + 1 // +1 spare
+	desired := max(demand, pm.config.MinReplicas)
+	desired = min(desired, pm.config.MaxReplicas)
+
+	if pool.Spec.Replicas >= desired {
+		return nil // Already enough capacity
+	}
+
+	// Also ensure at least ScaleUpStep growth for responsiveness
+	grown := pool.Spec.Replicas + pm.config.ScaleUpStep
+	newReplicas := min(max(desired, grown), pm.config.MaxReplicas)
+	if newReplicas <= pool.Spec.Replicas {
+		return nil
+	}
+
+	pool.Spec.Replicas = newReplicas
+	if err := pm.k8sClient.Update(ctx, pool); err != nil {
+		return fmt.Errorf("scale up pool %s to %d: %w", state.poolName, newReplicas, err)
+	}
+
+	log.Printf("Scaled up managed pool %s to %d replicas (demand=%d)", state.poolName, newReplicas, demand)
+	return nil
+}
+
+// sweepLoop runs periodically to scale down idle pools and garbage-collect empty pools.
+func (pm *PoolManager) sweepLoop() {
+	defer pm.wg.Done()
+	ticker := time.NewTicker(pm.config.SweepInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-pm.stopCh:
+			return
+		case <-ticker.C:
+			pm.sweep()
+		}
+	}
+}
+
+// sweep performs one round of scale-down and GC.
+func (pm *PoolManager) sweep() {
+	pm.pools.Range(func(key, value any) bool {
+		poolName := key.(string)
+		state := value.(*poolState)
+
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+
+		pool := &arlv1alpha1.WarmPool{}
+		if err := pm.k8sClient.Get(ctx, types.NamespacedName{
+			Name: poolName, Namespace: state.namespace,
+		}, pool); err != nil {
+			if errors.IsNotFound(err) {
+				// Pool was deleted externally; clean up state
+				pm.pools.Delete(poolName)
+			}
+			return true
+		}
+
+		activeSessions := state.sessionCount.Load()
+
+		// GC: delete pools with no sessions past TTL
+		if activeSessions <= 0 {
+			state.mu.RLock()
+			lastEnd := state.lastSessionEnd
+			state.mu.RUnlock()
+
+			if !lastEnd.IsZero() && time.Since(lastEnd) > pm.config.EmptyPoolTTL {
+				if err := pm.k8sClient.Delete(ctx, pool); err != nil && !errors.IsNotFound(err) {
+					log.Printf("Warning: failed to GC managed pool %s: %v", poolName, err)
+				} else {
+					pm.pools.Delete(poolName)
+					log.Printf("GC'd empty managed pool %s (idle for %v)", poolName, time.Since(lastEnd))
+				}
+				return true
+			}
+		}
+
+		// Scale down: if we have more replicas than needed
+		desiredReplicas := max(activeSessions+1, pm.config.MinReplicas) // keep 1 spare
+
+		if pool.Spec.Replicas > desiredReplicas {
+			state.mu.Lock()
+			if state.idleSince.IsZero() {
+				state.idleSince = time.Now()
+				state.mu.Unlock()
+				return true
+			}
+			elapsed := time.Since(state.idleSince)
+			state.mu.Unlock()
+
+			if elapsed > pm.config.IdleCooldown {
+				pool.Spec.Replicas = desiredReplicas
+				if err := pm.k8sClient.Update(ctx, pool); err != nil {
+					log.Printf("Warning: failed to scale down managed pool %s: %v", poolName, err)
+				} else {
+					state.mu.Lock()
+					state.idleSince = time.Time{}
+					state.mu.Unlock()
+					log.Printf("Scaled down managed pool %s to %d replicas", poolName, desiredReplicas)
+				}
+			}
+		} else {
+			// Not over-provisioned; reset idle tracking
+			state.mu.Lock()
+			state.idleSince = time.Time{}
+			state.mu.Unlock()
+		}
+
+		return true
+	})
+}
+
+// managedPoolName generates a deterministic pool name from image and namespace.
+func managedPoolName(image, namespace string) string {
+	h := sha256.Sum256([]byte(namespace + "/" + image))
+	return "managed-" + hex.EncodeToString(h[:6])
+}
+
+// normalizeImage performs basic Docker image normalization.
+func normalizeImage(image string) string {
+	// Strip docker.io/library/ prefix
+	image = strings.TrimPrefix(image, "docker.io/library/")
+	image = strings.TrimPrefix(image, "docker.io/")
+
+	// Add :latest tag if no tag specified
+	if !strings.Contains(image, ":") && !strings.Contains(image, "@") {
+		image = image + ":latest"
+	}
+
+	return image
+}

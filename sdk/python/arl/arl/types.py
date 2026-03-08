@@ -75,6 +75,13 @@ class SessionInfo(BaseModel):
     model_config = {"populate_by_name": True}
 
 
+class ManagedSessionInfo(SessionInfo):
+    """Session info with experiment metadata."""
+
+    experiment_id: str = Field("", alias="experimentId")
+    managed: bool = False
+
+
 class ExecuteResponse(BaseModel):
     """Response from executing steps."""
 

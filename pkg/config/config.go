@@ -84,6 +84,15 @@ type Config struct {
 	// are insufficient (soft affinity).
 	ImageLocalitySpreadFactor float64
 	ImageLocalityWeight       int32
+
+	// Managed pool auto-scaling configuration
+	ManagedPoolInitialReplicas int32
+	ManagedPoolMinReplicas     int32
+	ManagedPoolMaxReplicas     int32
+	ManagedPoolScaleUpStep     int32
+	ManagedPoolIdleCooldown    time.Duration
+	ManagedPoolEmptyTTL        time.Duration
+	ManagedPoolSweepInterval   time.Duration
 }
 
 // DefaultConfig returns the default configuration
@@ -128,6 +137,14 @@ func DefaultConfig() *Config {
 
 		ImageLocalitySpreadFactor: 0.25,
 		ImageLocalityWeight:       100,
+
+		ManagedPoolInitialReplicas: 2,
+		ManagedPoolMinReplicas:     0,
+		ManagedPoolMaxReplicas:     50,
+		ManagedPoolScaleUpStep:     2,
+		ManagedPoolIdleCooldown:    5 * time.Minute,
+		ManagedPoolEmptyTTL:        10 * time.Minute,
+		ManagedPoolSweepInterval:   30 * time.Second,
 	}
 }
 
@@ -318,6 +335,49 @@ func LoadFromEnv() *Config {
 		}
 	}
 
+	// Managed pool configuration
+	if v := os.Getenv("MANAGED_POOL_INITIAL_REPLICAS"); v != "" {
+		if n, err := strconv.ParseInt(v, 10, 32); err == nil {
+			cfg.ManagedPoolInitialReplicas = int32(n)
+		}
+	}
+
+	if v := os.Getenv("MANAGED_POOL_MIN_REPLICAS"); v != "" {
+		if n, err := strconv.ParseInt(v, 10, 32); err == nil {
+			cfg.ManagedPoolMinReplicas = int32(n)
+		}
+	}
+
+	if v := os.Getenv("MANAGED_POOL_MAX_REPLICAS"); v != "" {
+		if n, err := strconv.ParseInt(v, 10, 32); err == nil {
+			cfg.ManagedPoolMaxReplicas = int32(n)
+		}
+	}
+
+	if v := os.Getenv("MANAGED_POOL_SCALE_UP_STEP"); v != "" {
+		if n, err := strconv.ParseInt(v, 10, 32); err == nil {
+			cfg.ManagedPoolScaleUpStep = int32(n)
+		}
+	}
+
+	if v := os.Getenv("MANAGED_POOL_IDLE_COOLDOWN"); v != "" {
+		if d, err := time.ParseDuration(v); err == nil {
+			cfg.ManagedPoolIdleCooldown = d
+		}
+	}
+
+	if v := os.Getenv("MANAGED_POOL_EMPTY_TTL"); v != "" {
+		if d, err := time.ParseDuration(v); err == nil {
+			cfg.ManagedPoolEmptyTTL = d
+		}
+	}
+
+	if v := os.Getenv("MANAGED_POOL_SWEEP_INTERVAL"); v != "" {
+		if d, err := time.ParseDuration(v); err == nil {
+			cfg.ManagedPoolSweepInterval = d
+		}
+	}
+
 	return cfg
 }
 
@@ -425,6 +485,32 @@ func (c *Config) Validate() error {
 
 	if c.ImageLocalityWeight < 1 || c.ImageLocalityWeight > 100 {
 		return fmt.Errorf("image locality weight must be 1-100: %d", c.ImageLocalityWeight)
+	}
+
+	// Validate managed pool configuration
+	if c.ManagedPoolMaxReplicas < 0 {
+		return fmt.Errorf("managed pool max replicas cannot be negative: %d", c.ManagedPoolMaxReplicas)
+	}
+
+	if c.ManagedPoolMinReplicas < 0 {
+		return fmt.Errorf("managed pool min replicas cannot be negative: %d", c.ManagedPoolMinReplicas)
+	}
+
+	if c.ManagedPoolMinReplicas > c.ManagedPoolMaxReplicas {
+		return fmt.Errorf("managed pool min replicas (%d) cannot exceed max replicas (%d)",
+			c.ManagedPoolMinReplicas, c.ManagedPoolMaxReplicas)
+	}
+
+	if c.ManagedPoolScaleUpStep < 1 {
+		return fmt.Errorf("managed pool scale up step must be >= 1: %d", c.ManagedPoolScaleUpStep)
+	}
+
+	if c.ManagedPoolSweepInterval <= 0 {
+		return fmt.Errorf("managed pool sweep interval must be positive: %v", c.ManagedPoolSweepInterval)
+	}
+
+	if c.ManagedPoolEmptyTTL <= 0 {
+		return fmt.Errorf("managed pool empty TTL must be positive: %v", c.ManagedPoolEmptyTTL)
 	}
 
 	return nil
