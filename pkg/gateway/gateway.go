@@ -41,6 +41,8 @@ type Gateway struct {
 	trajectoryWriter *audit.TrajectoryWriter
 	sessions         sync.Map // sessionID → *session
 	sessionCount     atomic.Int64
+	lastTouchMu      sync.Mutex
+	lastTouchTime    map[string]time.Time // sandboxName → last K8s update time
 }
 
 // New creates a new gateway. metrics and trajectoryWriter may be nil.
@@ -50,6 +52,7 @@ func New(k8sClient client.Client, sidecarClient interfaces.SidecarClient, metric
 		sidecarClient:    sidecarClient,
 		metrics:          metrics,
 		trajectoryWriter: trajectoryWriter,
+		lastTouchTime:    make(map[string]time.Time),
 	}
 }
 
@@ -191,6 +194,10 @@ func (g *Gateway) DeleteSession(ctx context.Context, sessionID string) error {
 	}
 
 	g.sessions.Delete(sessionID)
+
+	g.lastTouchMu.Lock()
+	delete(g.lastTouchTime, sandboxName)
+	g.lastTouchMu.Unlock()
 
 	if g.metrics != nil {
 		g.metrics.SetActiveSessions(g.sessionCount.Add(-1))
@@ -676,21 +683,32 @@ func (g *Gateway) diagnosePoolHealth(ctx context.Context, poolRef, namespace str
 
 // touchSandboxLastTaskTime patches the Sandbox status.lastTaskTime to now.
 // Runs asynchronously so it doesn't block the execute response.
+// Debounced: skips the K8s API call if the same sandbox was updated within
+// the last 60 seconds, since idle-timeout precision of minutes is sufficient.
+const lastTaskTimeDebouncePeriod = 60 * time.Second
+
 func (g *Gateway) touchSandboxLastTaskTime(sandboxName, namespace string) {
+	g.lastTouchMu.Lock()
+	if last, ok := g.lastTouchTime[sandboxName]; ok && time.Since(last) < lastTaskTimeDebouncePeriod {
+		g.lastTouchMu.Unlock()
+		return
+	}
+	g.lastTouchTime[sandboxName] = time.Now()
+	g.lastTouchMu.Unlock()
+
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	sb := &arlv1alpha1.Sandbox{}
-	key := types.NamespacedName{Name: sandboxName, Namespace: namespace}
-	if err := g.k8sClient.Get(ctx, key, sb); err != nil {
-		log.Printf("Warning: failed to get sandbox %s for lastTaskTime update: %v", sandboxName, err)
-		return
-	}
-
 	now := metav1.Now()
+	patch := client.MergeFrom(&arlv1alpha1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{Name: sandboxName, Namespace: namespace},
+	})
+	sb := &arlv1alpha1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{Name: sandboxName, Namespace: namespace},
+	}
 	sb.Status.LastTaskTime = &now
-	if err := g.k8sClient.Status().Update(ctx, sb); err != nil {
-		log.Printf("Warning: failed to update sandbox %s lastTaskTime: %v", sandboxName, err)
+	if err := g.k8sClient.Status().Patch(ctx, sb, patch); err != nil {
+		log.Printf("Warning: failed to patch sandbox %s lastTaskTime: %v", sandboxName, err)
 	}
 }
 

@@ -138,6 +138,14 @@ crds:
   install: true
   keep: true
 
+# API Server Priority and Fairness
+# Promotes operator & gateway ServiceAccounts to a higher priority level
+# so K8s API requests are not throttled under high load.
+apiPriority:
+  enabled: true
+  priorityLevel: "workload-high"  # workload-high has ~110 concurrency seats
+  matchingPrecedence: 900         # lower number = higher priority (exempt=1, system=900s)
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Prometheus
 # ─────────────────────────────────────────────────────────────────────────────
