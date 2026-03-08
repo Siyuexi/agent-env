@@ -8,6 +8,8 @@ Tests all major features:
 5. Session history & trajectory export
 6. Tool provisioning and calling
 7. Interactive shell (WebSocket)
+8. Keep-alive & reattach
+9. Managed sessions (server-side pool auto-scaling)
 
 Prerequisites:
     - ARL operator + gateway deployed to Kubernetes
@@ -31,6 +33,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import sys
 import time
@@ -39,6 +42,7 @@ from arl import (
     GatewayClient,
     GatewayError,
     InteractiveShellClient,
+    ManagedSession,
     PoolNotReadyError,
     ResourceRequirements,
     SandboxSession,
@@ -588,6 +592,133 @@ def test_keep_alive_reattach(gateway_url: str, pool_name: str, verbose: bool) ->
     return ok, time.time() - start
 
 
+def test_managed_session(
+    gateway_url: str, pool_image: str, verbose: bool
+) -> tuple[bool, float]:
+    """Test 9: Managed sessions with server-side pool auto-scaling.
+
+    Demonstrates ManagedSession: just specify image + experiment ID,
+    no manual pool creation needed. The server handles pool lifecycle.
+    """
+    start = time.time()
+    experiment_id = f"sdk-test-{int(time.time())}"
+    client = GatewayClient(base_url=gateway_url)
+
+    try:
+        # --- Phase 1: Create managed sessions ---
+        if verbose:
+            console.print(
+                f"  Experiment: [cyan]{experiment_id}[/cyan]"
+            )
+            console.print(f"  Image: [cyan]{pool_image}[/cyan]")
+            console.print("  Creating managed session (server auto-creates pool)...")
+
+        with ManagedSession(
+            image=pool_image,
+            experiment_id=experiment_id,
+            namespace=NAMESPACE,
+            gateway_url=gateway_url,
+        ) as session:
+            if verbose:
+                console.print(f"  Session: [cyan]{session.session_id}[/cyan]")
+                console.print(f"  Pool ref: [cyan]{session.pool_ref}[/cyan]")
+                info = session.session_info
+                if info:
+                    console.print(f"  Pod: [cyan]{info.pod_name}[/cyan] ({info.pod_ip})")
+
+            # Execute commands
+            result = session.execute(
+                [
+                    {"name": "hello", "command": ["echo", "Hello from managed session!"]},
+                    {"name": "uname", "command": ["uname", "-s"]},
+                ]
+            )
+
+            if verbose:
+                for r in result.results:
+                    exit_style = "green" if r.output.exit_code == 0 else "red"
+                    console.print(
+                        f"    [{r.index}] {r.name}: "
+                        f"exit_code=[{exit_style}]{r.output.exit_code}[/{exit_style}]"
+                    )
+                    if r.output.stdout:
+                        console.print(f"         stdout: {r.output.stdout.strip()[:80]}")
+
+            exec_ok = all(r.output.exit_code == 0 for r in result.results)
+
+            # Snapshot & restore also works with managed sessions
+            r1 = session.execute(
+                [{"name": "write_v1", "command": ["sh", "-c", "echo v1 > /workspace/managed.txt"]}]
+            )
+            snap = r1.results[0].snapshot_id
+
+            session.execute(
+                [{"name": "write_v2", "command": ["sh", "-c", "echo v2 > /workspace/managed.txt"]}]
+            )
+            session.restore(snap)
+
+            check = session.execute(
+                [{"name": "check", "command": ["cat", "/workspace/managed.txt"]}]
+            )
+            restored = check.results[0].output.stdout.strip()
+            if verbose:
+                console.print(
+                    f"  Snapshot restore: expected='v1', got='[yellow]{restored}[/yellow]'"
+                )
+
+            restore_ok = restored == "v1"
+
+        if verbose:
+            console.print("  [green]✓[/green] Session auto-cleaned up on exit")
+
+        # --- Phase 2: List experiment sessions ---
+        sessions = client.list_experiment_sessions(experiment_id)
+        if verbose:
+            console.print(f"  Experiment sessions (after cleanup): {len(sessions)}")
+
+        # --- Phase 3: Manual lifecycle (no context manager) + batch-delete ---
+        session2 = ManagedSession(
+            image=pool_image,
+            experiment_id=experiment_id,
+            namespace=NAMESPACE,
+            gateway_url=gateway_url,
+        )
+        try:
+            session2.create_sandbox()
+            if verbose:
+                console.print(f"  Second session (manual): [cyan]{session2.session_id}[/cyan]")
+
+            session2.execute(
+                [{"name": "ping", "command": ["echo", "session2"]}]
+            )
+        finally:
+            session2.delete_sandbox()
+            session2.close()
+            if verbose:
+                console.print("  [green]✓[/green] Manual session cleaned up")
+
+        # Batch delete all sessions for the experiment
+        deleted = client.delete_experiment(experiment_id)
+        if verbose:
+            console.print(f"  Batch delete: [cyan]{deleted}[/cyan] session(s) deleted")
+
+        # Verify experiment is empty
+        remaining = client.list_experiment_sessions(experiment_id)
+        cleanup_ok = len(remaining) == 0
+        if verbose:
+            console.print(f"  Remaining sessions: {len(remaining)}")
+
+        ok = exec_ok and restore_ok and cleanup_ok
+        return ok, time.time() - start
+
+    except Exception as e:
+        console.print(f"  [red]✗ Managed session test failed: {e}[/red]")
+        # Best-effort cleanup
+        with contextlib.suppress(Exception):
+            client.delete_experiment(experiment_id)
+        return False, time.time() - start
+
+
 def print_summary(results: list[TestResult]) -> None:
     """Print test results summary table."""
     table = Table(title="\n[bold]Test Results[/bold]", show_header=True, header_style="bold cyan")
@@ -704,7 +835,7 @@ def main() -> None:
     pool_mgr = WarmPoolManager(namespace=NAMESPACE, gateway_url=args.gateway_url)
 
     results: list[TestResult] = []
-    test_count = 8
+    test_count = 9
 
     # Test 1: Health check
     with Progress(
@@ -839,6 +970,22 @@ def main() -> None:
     status = "[green]\u2713[/green]" if passed else "[red]\u2717[/red]"
     console.print(f"[8/{test_count}] {status} Keep-Alive & Reattach ([cyan]{duration:.2f}s[/cyan])")
     results.append(TestResult("Keep-Alive & Reattach", passed, duration))
+
+    # Test 9: Managed sessions
+    with Progress(
+        SpinnerColumn(),
+        TextColumn("[progress.description]{task.description}"),
+        console=console,
+    ) as progress:
+        task = progress.add_task(f"[9/{test_count}] Managed Sessions", total=None)
+        passed, duration = test_managed_session(
+            args.gateway_url, args.pool_image, args.verbose
+        )
+        progress.update(task, completed=True)
+
+    status = "[green]✓[/green]" if passed else "[red]✗[/red]"
+    console.print(f"[9/{test_count}] {status} Managed Sessions ([cyan]{duration:.2f}s[/cyan])")
+    results.append(TestResult("Managed Sessions", passed, duration))
 
     # Cleanup
     if not args.skip_cleanup:
