@@ -31,6 +31,13 @@ rules:
   - apiGroups:
       - arl.infra.io
     resources:
+      - sandboxes/status
+    verbs:
+      - get
+      - patch
+  - apiGroups:
+      - arl.infra.io
+    resources:
       - warmpools
     verbs:
       - get
