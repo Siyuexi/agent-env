@@ -59,21 +59,31 @@ func main() {
 	// Create sidecar gRPC client
 	sidecarClient := client.NewGRPCSidecarClient(grpcPort, cfg.HTTPClientTimeout)
 
-	// Create trajectory writer (optional)
+	// Create trajectory writer (optional, with retry for startup ordering)
 	var trajectoryWriter *audit.TrajectoryWriter
 	if cfg.TrajectoryEnabled {
-		tw, err := audit.NewTrajectoryWriter(audit.TrajectoryConfig{
+		trajCfg := audit.TrajectoryConfig{
 			Addr:     cfg.ClickHouseAddr,
 			Database: cfg.ClickHouseDatabase,
 			Username: cfg.ClickHouseUsername,
 			Password: cfg.ClickHousePassword,
 			Debug:    cfg.TrajectoryDebug,
-		})
-		if err != nil {
-			log.Printf("Warning: Trajectory writer init failed: %v (trajectory disabled)", err)
-		} else {
-			trajectoryWriter = tw
-			log.Println("Trajectory writer enabled")
+		}
+		const maxRetries = 5
+		for i := range maxRetries {
+			tw, err := audit.NewTrajectoryWriter(trajCfg)
+			if err == nil {
+				trajectoryWriter = tw
+				log.Println("Trajectory writer enabled")
+				break
+			}
+			if i < maxRetries-1 {
+				wait := time.Duration(i+1) * 5 * time.Second
+				log.Printf("Warning: Trajectory writer init failed (attempt %d/%d): %v; retrying in %v", i+1, maxRetries, err, wait)
+				time.Sleep(wait)
+			} else {
+				log.Printf("Warning: Trajectory writer init failed after %d attempts: %v (trajectory disabled)", maxRetries, err)
+			}
 		}
 	}
 

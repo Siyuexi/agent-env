@@ -29,7 +29,7 @@
       "gridPos": { "h": 4, "w": 4, "x": 0, "y": 1 },
       "id": 1,
       "options": { "colorMode": "background", "graphMode": "area", "reduceOptions": { "calcs": ["lastNotNull"] } },
-      "targets": [{ "datasource": { "type": "prometheus", "uid": "arl-prometheus" }, "expr": "arl_gateway_active_sessions", "legendFormat": "Sessions" }],
+      "targets": [{ "datasource": { "type": "prometheus", "uid": "arl-prometheus" }, "expr": "sum(arl_gateway_active_sessions)", "legendFormat": "Sessions" }],
       "title": "Active Sessions",
       "type": "stat"
     },
@@ -49,7 +49,7 @@
       "gridPos": { "h": 4, "w": 4, "x": 4, "y": 1 },
       "id": 2,
       "options": { "colorMode": "background", "graphMode": "area", "reduceOptions": { "calcs": ["lastNotNull"] } },
-      "targets": [{ "datasource": { "type": "prometheus", "uid": "arl-prometheus" }, "expr": "sum(arl_pool_utilization{pool=~\"$pool\", status=\"ready\"})", "legendFormat": "Ready" }],
+      "targets": [{ "datasource": { "type": "prometheus", "uid": "arl-prometheus" }, "expr": "sum(arl_pool_utilization{status=\"ready\"})", "legendFormat": "Ready" }],
       "title": "Pool Ready Pods",
       "type": "stat"
     },
@@ -69,7 +69,7 @@
       "gridPos": { "h": 4, "w": 4, "x": 8, "y": 1 },
       "id": 3,
       "options": { "colorMode": "value", "graphMode": "area", "reduceOptions": { "calcs": ["lastNotNull"] } },
-      "targets": [{ "datasource": { "type": "prometheus", "uid": "arl-prometheus" }, "expr": "sum(arl_pool_utilization{pool=~\"$pool\", status=\"allocated\"})", "legendFormat": "Allocated" }],
+      "targets": [{ "datasource": { "type": "prometheus", "uid": "arl-prometheus" }, "expr": "sum(arl_pool_utilization{status=\"allocated\"})", "legendFormat": "Allocated" }],
       "title": "Allocated Pods",
       "type": "stat"
     },
@@ -89,7 +89,7 @@
       "gridPos": { "h": 4, "w": 4, "x": 12, "y": 1 },
       "id": 4,
       "options": { "colorMode": "value", "graphMode": "area", "reduceOptions": { "calcs": ["lastNotNull"] } },
-      "targets": [{ "datasource": { "type": "prometheus", "uid": "arl-prometheus" }, "expr": "sum(arl_warmpool_pending_pods{pool=~\"$pool\"})", "legendFormat": "Pending" }],
+      "targets": [{ "datasource": { "type": "prometheus", "uid": "arl-prometheus" }, "expr": "sum(arl_warmpool_pending_pods)", "legendFormat": "Pending" }],
       "title": "Pending Pods",
       "type": "stat"
     },
@@ -102,10 +102,23 @@
       "id": 5,
       "options": { "tooltip": { "mode": "multi" }, "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["lastNotNull"] } },
       "targets": [
-        { "datasource": { "type": "prometheus", "uid": "arl-prometheus" }, "expr": "arl_pool_utilization{pool=~\"$pool\", status=\"ready\"}", "legendFormat": "{{pool}} ready" },
-        { "datasource": { "type": "prometheus", "uid": "arl-prometheus" }, "expr": "arl_pool_utilization{pool=~\"$pool\", status=\"allocated\"}", "legendFormat": "{{pool}} allocated" }
+        { "datasource": { "type": "prometheus", "uid": "arl-prometheus" }, "expr": "sum by (status) (arl_pool_utilization{pool=~\"$pool\"})", "legendFormat": "{{status}}" }
       ],
       "title": "Pool Utilization",
+      "type": "timeseries"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "arl-prometheus" },
+      "fieldConfig": {
+        "defaults": { "color": { "mode": "palette-classic" }, "unit": "short", "custom": { "lineWidth": 2, "fillOpacity": 10, "stacking": { "mode": "normal" } } }
+      },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 13 },
+      "id": 17,
+      "options": { "tooltip": { "mode": "multi" }, "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["lastNotNull"], "sortBy": "Last *", "sortDesc": true } },
+      "targets": [
+        { "datasource": { "type": "prometheus", "uid": "arl-prometheus" }, "expr": "topk(20, arl_pool_utilization{pool=~\"$pool\", status=\"allocated\"} > 0)", "legendFormat": "{{pool}}" }
+      ],
+      "title": "Top 20 Active Pools (allocated > 0)",
       "type": "timeseries"
     },
     {
@@ -124,7 +137,7 @@
     },
     {
       "collapsed": false,
-      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 13 },
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 21 },
       "id": 101,
       "title": "Pod Lifecycle",
       "type": "row"
@@ -134,12 +147,13 @@
       "fieldConfig": {
         "defaults": { "color": { "mode": "palette-classic" }, "unit": "s", "custom": { "lineWidth": 2, "fillOpacity": 10 } }
       },
-      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 14 },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 22 },
       "id": 7,
       "options": { "tooltip": { "mode": "multi" }, "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["lastNotNull"] } },
       "targets": [
-        { "datasource": { "type": "prometheus", "uid": "arl-prometheus" }, "expr": "histogram_quantile(0.50, sum by (pool, le) (rate(arl_warmpool_pod_ready_seconds_bucket{pool=~\"$pool\"}[5m])))", "legendFormat": "p50 {{pool}}" },
-        { "datasource": { "type": "prometheus", "uid": "arl-prometheus" }, "expr": "histogram_quantile(0.95, sum by (pool, le) (rate(arl_warmpool_pod_ready_seconds_bucket{pool=~\"$pool\"}[5m])))", "legendFormat": "p95 {{pool}}" }
+        { "datasource": { "type": "prometheus", "uid": "arl-prometheus" }, "expr": "histogram_quantile(0.50, sum by (le) (rate(arl_warmpool_pod_ready_seconds_bucket{pool=~\"$pool\"}[5m])))", "legendFormat": "p50" },
+        { "datasource": { "type": "prometheus", "uid": "arl-prometheus" }, "expr": "histogram_quantile(0.95, sum by (le) (rate(arl_warmpool_pod_ready_seconds_bucket{pool=~\"$pool\"}[5m])))", "legendFormat": "p95" },
+        { "datasource": { "type": "prometheus", "uid": "arl-prometheus" }, "expr": "histogram_quantile(0.99, sum by (le) (rate(arl_warmpool_pod_ready_seconds_bucket{pool=~\"$pool\"}[5m])))", "legendFormat": "p99" }
       ],
       "title": "Pod Ready Duration (creation→ready)",
       "type": "timeseries"
@@ -149,12 +163,12 @@
       "fieldConfig": {
         "defaults": { "color": { "mode": "palette-classic" }, "unit": "s", "custom": { "lineWidth": 2, "fillOpacity": 10 } }
       },
-      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 14 },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 22 },
       "id": 8,
       "options": { "tooltip": { "mode": "multi" }, "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["lastNotNull"] } },
       "targets": [
-        { "datasource": { "type": "prometheus", "uid": "arl-prometheus" }, "expr": "histogram_quantile(0.50, sum by (pool, container, le) (rate(arl_warmpool_container_start_seconds_bucket{pool=~\"$pool\"}[5m])))", "legendFormat": "p50 {{pool}}/{{container}}" },
-        { "datasource": { "type": "prometheus", "uid": "arl-prometheus" }, "expr": "histogram_quantile(0.95, sum by (pool, container, le) (rate(arl_warmpool_container_start_seconds_bucket{pool=~\"$pool\"}[5m])))", "legendFormat": "p95 {{pool}}/{{container}}" }
+        { "datasource": { "type": "prometheus", "uid": "arl-prometheus" }, "expr": "histogram_quantile(0.50, sum by (container, le) (rate(arl_warmpool_container_start_seconds_bucket{pool=~\"$pool\"}[5m])))", "legendFormat": "p50 {{container}}" },
+        { "datasource": { "type": "prometheus", "uid": "arl-prometheus" }, "expr": "histogram_quantile(0.95, sum by (container, le) (rate(arl_warmpool_container_start_seconds_bucket{pool=~\"$pool\"}[5m])))", "legendFormat": "p95 {{container}}" }
       ],
       "title": "Container Start Duration",
       "type": "timeseries"
@@ -164,12 +178,14 @@
       "fieldConfig": {
         "defaults": { "color": { "mode": "palette-classic" }, "unit": "s", "custom": { "lineWidth": 2, "fillOpacity": 10 } }
       },
-      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 22 },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 30 },
       "id": 9,
       "options": { "tooltip": { "mode": "multi" }, "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["lastNotNull"] } },
       "targets": [
-        { "datasource": { "type": "prometheus", "uid": "arl-prometheus" }, "expr": "histogram_quantile(0.50, sum by (pool, le) (rate(arl_warmpool_first_pod_ready_seconds_bucket{pool=~\"$pool\"}[5m])))", "legendFormat": "p50 first pod {{pool}}" },
-        { "datasource": { "type": "prometheus", "uid": "arl-prometheus" }, "expr": "histogram_quantile(0.50, sum by (pool, le) (rate(arl_warmpool_all_pods_ready_seconds_bucket{pool=~\"$pool\"}[5m])))", "legendFormat": "p50 all pods {{pool}}" }
+        { "datasource": { "type": "prometheus", "uid": "arl-prometheus" }, "expr": "histogram_quantile(0.50, sum by (le) (rate(arl_warmpool_first_pod_ready_seconds_bucket{pool=~\"$pool\"}[5m])))", "legendFormat": "p50 first pod" },
+        { "datasource": { "type": "prometheus", "uid": "arl-prometheus" }, "expr": "histogram_quantile(0.50, sum by (le) (rate(arl_warmpool_all_pods_ready_seconds_bucket{pool=~\"$pool\"}[5m])))", "legendFormat": "p50 all pods" },
+        { "datasource": { "type": "prometheus", "uid": "arl-prometheus" }, "expr": "histogram_quantile(0.95, sum by (le) (rate(arl_warmpool_first_pod_ready_seconds_bucket{pool=~\"$pool\"}[5m])))", "legendFormat": "p95 first pod" },
+        { "datasource": { "type": "prometheus", "uid": "arl-prometheus" }, "expr": "histogram_quantile(0.95, sum by (le) (rate(arl_warmpool_all_pods_ready_seconds_bucket{pool=~\"$pool\"}[5m])))", "legendFormat": "p95 all pods" }
       ],
       "title": "Scale-out Readiness Duration",
       "type": "timeseries"
@@ -179,19 +195,19 @@
       "fieldConfig": {
         "defaults": { "color": { "mode": "palette-classic" }, "unit": "ops", "custom": { "lineWidth": 2, "fillOpacity": 10 } }
       },
-      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 22 },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 30 },
       "id": 10,
       "options": { "tooltip": { "mode": "multi" }, "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["lastNotNull"] } },
       "targets": [
-        { "datasource": { "type": "prometheus", "uid": "arl-prometheus" }, "expr": "sum by (pool, reason) (rate(arl_warmpool_image_pull_errors_total{pool=~\"$pool\"}[5m]))", "legendFormat": "{{pool}} / {{reason}}" },
-        { "datasource": { "type": "prometheus", "uid": "arl-prometheus" }, "expr": "sum by (pool, reason) (rate(arl_warmpool_pod_delete_total{pool=~\"$pool\"}[5m]))", "legendFormat": "delete {{pool}} / {{reason}}" }
+        { "datasource": { "type": "prometheus", "uid": "arl-prometheus" }, "expr": "sum by (reason) (rate(arl_warmpool_image_pull_errors_total{pool=~\"$pool\"}[5m]))", "legendFormat": "pull error / {{reason}}" },
+        { "datasource": { "type": "prometheus", "uid": "arl-prometheus" }, "expr": "sum by (reason) (rate(arl_warmpool_pod_delete_total{pool=~\"$pool\"}[5m]))", "legendFormat": "delete / {{reason}}" }
       ],
       "title": "Image Pull Errors & Pod Deletions Rate",
       "type": "timeseries"
     },
     {
       "collapsed": false,
-      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 30 },
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 38 },
       "id": 102,
       "title": "Sandbox",
       "type": "row"
@@ -201,13 +217,13 @@
       "fieldConfig": {
         "defaults": { "color": { "mode": "palette-classic" }, "unit": "s", "custom": { "lineWidth": 2, "fillOpacity": 10 } }
       },
-      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 31 },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 39 },
       "id": 11,
       "options": { "tooltip": { "mode": "multi" }, "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["lastNotNull", "mean"] } },
       "targets": [
-        { "datasource": { "type": "prometheus", "uid": "arl-prometheus" }, "expr": "histogram_quantile(0.50, sum by (pool, le) (rate(arl_sandbox_e2e_ready_seconds_bucket{pool=~\"$pool\"}[5m])))", "legendFormat": "p50 {{pool}}" },
-        { "datasource": { "type": "prometheus", "uid": "arl-prometheus" }, "expr": "histogram_quantile(0.95, sum by (pool, le) (rate(arl_sandbox_e2e_ready_seconds_bucket{pool=~\"$pool\"}[5m])))", "legendFormat": "p95 {{pool}}" },
-        { "datasource": { "type": "prometheus", "uid": "arl-prometheus" }, "expr": "histogram_quantile(0.99, sum by (pool, le) (rate(arl_sandbox_e2e_ready_seconds_bucket{pool=~\"$pool\"}[5m])))", "legendFormat": "p99 {{pool}}" }
+        { "datasource": { "type": "prometheus", "uid": "arl-prometheus" }, "expr": "histogram_quantile(0.50, sum by (le) (rate(arl_sandbox_e2e_ready_seconds_bucket{pool=~\"$pool\"}[5m])))", "legendFormat": "p50" },
+        { "datasource": { "type": "prometheus", "uid": "arl-prometheus" }, "expr": "histogram_quantile(0.95, sum by (le) (rate(arl_sandbox_e2e_ready_seconds_bucket{pool=~\"$pool\"}[5m])))", "legendFormat": "p95" },
+        { "datasource": { "type": "prometheus", "uid": "arl-prometheus" }, "expr": "histogram_quantile(0.99, sum by (le) (rate(arl_sandbox_e2e_ready_seconds_bucket{pool=~\"$pool\"}[5m])))", "legendFormat": "p99" }
       ],
       "title": "Sandbox E2E Ready Latency (user-visible)",
       "type": "timeseries"
@@ -217,18 +233,18 @@
       "fieldConfig": {
         "defaults": { "color": { "mode": "palette-classic" }, "unit": "ops", "custom": { "lineWidth": 2, "fillOpacity": 10 } }
       },
-      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 31 },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 39 },
       "id": 12,
       "options": { "tooltip": { "mode": "multi" }, "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["lastNotNull"] } },
       "targets": [
-        { "datasource": { "type": "prometheus", "uid": "arl-prometheus" }, "expr": "sum by (pool) (rate(arl_sandbox_no_idle_pods_total{pool=~\"$pool\"}[5m]))", "legendFormat": "no-idle {{pool}}" }
+        { "datasource": { "type": "prometheus", "uid": "arl-prometheus" }, "expr": "sum(rate(arl_sandbox_no_idle_pods_total{pool=~\"$pool\"}[5m]))", "legendFormat": "no-idle total" }
       ],
       "title": "No Idle Pods Rate (pool pressure)",
       "type": "timeseries"
     },
     {
       "collapsed": false,
-      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 39 },
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 47 },
       "id": 103,
       "title": "Gateway Execution",
       "type": "row"
@@ -238,7 +254,7 @@
       "fieldConfig": {
         "defaults": { "color": { "mode": "palette-classic" }, "unit": "s", "custom": { "lineWidth": 2, "fillOpacity": 10 } }
       },
-      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 40 },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 48 },
       "id": 13,
       "options": { "tooltip": { "mode": "multi" }, "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["lastNotNull", "mean"] } },
       "targets": [
@@ -254,7 +270,7 @@
       "fieldConfig": {
         "defaults": { "color": { "mode": "palette-classic" }, "unit": "ops", "custom": { "lineWidth": 2, "fillOpacity": 10 } }
       },
-      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 40 },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 48 },
       "id": 14,
       "options": { "tooltip": { "mode": "multi" }, "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["lastNotNull"] } },
       "targets": [
@@ -268,7 +284,7 @@
       "fieldConfig": {
         "defaults": { "color": { "mode": "palette-classic" }, "unit": "s", "custom": { "lineWidth": 2, "fillOpacity": 10 } }
       },
-      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 48 },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 56 },
       "id": 15,
       "options": { "tooltip": { "mode": "multi" }, "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["lastNotNull", "mean"] } },
       "targets": [
@@ -283,16 +299,219 @@
       "fieldConfig": {
         "defaults": { "color": { "mode": "palette-classic" }, "unit": "s", "custom": { "lineWidth": 2, "fillOpacity": 10 } }
       },
-      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 48 },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 56 },
       "id": 16,
       "options": { "tooltip": { "mode": "multi" }, "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["lastNotNull", "mean"] } },
       "targets": [
-        { "datasource": { "type": "prometheus", "uid": "arl-prometheus" }, "expr": "histogram_quantile(0.50, rate(arl_gateway_restore_duration_seconds_bucket[5m]))", "legendFormat": "restore p50" },
-        { "datasource": { "type": "prometheus", "uid": "arl-prometheus" }, "expr": "histogram_quantile(0.95, rate(arl_gateway_restore_duration_seconds_bucket[5m]))", "legendFormat": "restore p95" },
+        { "datasource": { "type": "prometheus", "uid": "arl-prometheus" }, "expr": "histogram_quantile(0.50, sum by (le) (rate(arl_gateway_restore_duration_seconds_bucket[5m])))", "legendFormat": "restore p50" },
+        { "datasource": { "type": "prometheus", "uid": "arl-prometheus" }, "expr": "histogram_quantile(0.95, sum by (le) (rate(arl_gateway_restore_duration_seconds_bucket[5m])))", "legendFormat": "restore p95" },
         { "datasource": { "type": "prometheus", "uid": "arl-prometheus" }, "expr": "sum by (result) (rate(arl_gateway_restore_result_total[5m]))", "legendFormat": "restore {{result}}" }
       ],
       "title": "Restore Duration & Results",
       "type": "timeseries"
+    },
+    {
+      "collapsed": true,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 64 },
+      "id": 104,
+      "title": "Controller Internals",
+      "type": "row",
+      "panels": [
+        {
+          "datasource": { "type": "prometheus", "uid": "arl-prometheus" },
+          "fieldConfig": {
+            "defaults": { "color": { "mode": "palette-classic" }, "unit": "s", "custom": { "lineWidth": 2, "fillOpacity": 10 } }
+          },
+          "gridPos": { "h": 8, "w": 12, "x": 0, "y": 65 },
+          "id": 18,
+          "options": { "tooltip": { "mode": "multi" }, "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["lastNotNull", "mean"] } },
+          "targets": [
+            { "datasource": { "type": "prometheus", "uid": "arl-prometheus" }, "expr": "histogram_quantile(0.50, sum by (controller, le) (rate(controller_runtime_reconcile_time_seconds_bucket[5m])))", "legendFormat": "p50 {{controller}}" },
+            { "datasource": { "type": "prometheus", "uid": "arl-prometheus" }, "expr": "histogram_quantile(0.95, sum by (controller, le) (rate(controller_runtime_reconcile_time_seconds_bucket[5m])))", "legendFormat": "p95 {{controller}}" },
+            { "datasource": { "type": "prometheus", "uid": "arl-prometheus" }, "expr": "histogram_quantile(0.99, sum by (controller, le) (rate(controller_runtime_reconcile_time_seconds_bucket[5m])))", "legendFormat": "p99 {{controller}}" }
+          ],
+          "title": "Reconcile Latency (controller-runtime)",
+          "type": "timeseries"
+        },
+        {
+          "datasource": { "type": "prometheus", "uid": "arl-prometheus" },
+          "fieldConfig": {
+            "defaults": { "color": { "mode": "palette-classic" }, "unit": "short", "custom": { "lineWidth": 2, "fillOpacity": 10 } }
+          },
+          "gridPos": { "h": 8, "w": 12, "x": 12, "y": 65 },
+          "id": 19,
+          "options": { "tooltip": { "mode": "multi" }, "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["lastNotNull"] } },
+          "targets": [
+            { "datasource": { "type": "prometheus", "uid": "arl-prometheus" }, "expr": "controller_runtime_active_workers", "legendFormat": "{{controller}}" }
+          ],
+          "title": "Active Reconcile Workers",
+          "type": "timeseries"
+        },
+        {
+          "datasource": { "type": "prometheus", "uid": "arl-prometheus" },
+          "fieldConfig": {
+            "defaults": { "color": { "mode": "palette-classic" }, "unit": "ops", "custom": { "lineWidth": 2, "fillOpacity": 10 } }
+          },
+          "gridPos": { "h": 8, "w": 12, "x": 0, "y": 73 },
+          "id": 20,
+          "options": { "tooltip": { "mode": "multi" }, "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["lastNotNull"] } },
+          "targets": [
+            { "datasource": { "type": "prometheus", "uid": "arl-prometheus" }, "expr": "sum by (controller) (rate(controller_runtime_reconcile_errors_total[5m]))", "legendFormat": "errors {{controller}}" },
+            { "datasource": { "type": "prometheus", "uid": "arl-prometheus" }, "expr": "sum by (controller) (rate(controller_runtime_reconcile_panics_total[5m]))", "legendFormat": "panics {{controller}}" }
+          ],
+          "title": "Reconcile Errors & Panics",
+          "type": "timeseries"
+        },
+        {
+          "datasource": { "type": "prometheus", "uid": "arl-prometheus" },
+          "fieldConfig": {
+            "defaults": { "color": { "mode": "palette-classic" }, "unit": "s", "custom": { "lineWidth": 2, "fillOpacity": 10 } }
+          },
+          "gridPos": { "h": 8, "w": 12, "x": 12, "y": 73 },
+          "id": 21,
+          "options": { "tooltip": { "mode": "multi" }, "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["lastNotNull"] } },
+          "targets": [
+            { "datasource": { "type": "prometheus", "uid": "arl-prometheus" }, "expr": "histogram_quantile(0.50, sum by (le) (rate(arl_warmpool_pod_schedule_seconds_bucket{pool=~\"$pool\"}[5m])))", "legendFormat": "p50" },
+            { "datasource": { "type": "prometheus", "uid": "arl-prometheus" }, "expr": "histogram_quantile(0.95, sum by (le) (rate(arl_warmpool_pod_schedule_seconds_bucket{pool=~\"$pool\"}[5m])))", "legendFormat": "p95" }
+          ],
+          "title": "Pod Schedule Latency",
+          "type": "timeseries"
+        }
+      ]
+    },
+    {
+      "collapsed": true,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 65 },
+      "id": 105,
+      "title": "Workqueue",
+      "type": "row",
+      "panels": [
+        {
+          "datasource": { "type": "prometheus", "uid": "arl-prometheus" },
+          "fieldConfig": {
+            "defaults": { "color": { "mode": "palette-classic" }, "unit": "short", "custom": { "lineWidth": 2, "fillOpacity": 20 } }
+          },
+          "gridPos": { "h": 8, "w": 12, "x": 0, "y": 66 },
+          "id": 22,
+          "options": { "tooltip": { "mode": "multi" }, "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["lastNotNull", "max"] } },
+          "targets": [
+            { "datasource": { "type": "prometheus", "uid": "arl-prometheus" }, "expr": "workqueue_depth", "legendFormat": "{{name}}" }
+          ],
+          "title": "Workqueue Depth",
+          "type": "timeseries"
+        },
+        {
+          "datasource": { "type": "prometheus", "uid": "arl-prometheus" },
+          "fieldConfig": {
+            "defaults": { "color": { "mode": "palette-classic" }, "unit": "ops", "custom": { "lineWidth": 2, "fillOpacity": 10 } }
+          },
+          "gridPos": { "h": 8, "w": 12, "x": 12, "y": 66 },
+          "id": 23,
+          "options": { "tooltip": { "mode": "multi" }, "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["lastNotNull"] } },
+          "targets": [
+            { "datasource": { "type": "prometheus", "uid": "arl-prometheus" }, "expr": "sum by (name) (rate(workqueue_adds_total[5m]))", "legendFormat": "adds {{name}}" },
+            { "datasource": { "type": "prometheus", "uid": "arl-prometheus" }, "expr": "sum by (name) (rate(workqueue_retries_total[5m]))", "legendFormat": "retries {{name}}" }
+          ],
+          "title": "Workqueue Throughput & Retries",
+          "type": "timeseries"
+        },
+        {
+          "datasource": { "type": "prometheus", "uid": "arl-prometheus" },
+          "fieldConfig": {
+            "defaults": { "color": { "mode": "palette-classic" }, "unit": "s", "custom": { "lineWidth": 2, "fillOpacity": 10 } }
+          },
+          "gridPos": { "h": 8, "w": 12, "x": 0, "y": 74 },
+          "id": 24,
+          "options": { "tooltip": { "mode": "multi" }, "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["lastNotNull"] } },
+          "targets": [
+            { "datasource": { "type": "prometheus", "uid": "arl-prometheus" }, "expr": "histogram_quantile(0.50, sum by (name, le) (rate(workqueue_queue_duration_seconds_bucket[5m])))", "legendFormat": "p50 {{name}}" },
+            { "datasource": { "type": "prometheus", "uid": "arl-prometheus" }, "expr": "histogram_quantile(0.95, sum by (name, le) (rate(workqueue_queue_duration_seconds_bucket[5m])))", "legendFormat": "p95 {{name}}" }
+          ],
+          "title": "Queue Wait Duration",
+          "type": "timeseries"
+        },
+        {
+          "datasource": { "type": "prometheus", "uid": "arl-prometheus" },
+          "fieldConfig": {
+            "defaults": { "color": { "mode": "palette-classic" }, "unit": "s", "custom": { "lineWidth": 2, "fillOpacity": 10 } }
+          },
+          "gridPos": { "h": 8, "w": 12, "x": 12, "y": 74 },
+          "id": 25,
+          "options": { "tooltip": { "mode": "multi" }, "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["lastNotNull"] } },
+          "targets": [
+            { "datasource": { "type": "prometheus", "uid": "arl-prometheus" }, "expr": "workqueue_unfinished_work_seconds", "legendFormat": "unfinished {{name}}" },
+            { "datasource": { "type": "prometheus", "uid": "arl-prometheus" }, "expr": "workqueue_longest_running_processor_seconds", "legendFormat": "longest {{name}}" }
+          ],
+          "title": "Unfinished Work & Longest Processor",
+          "type": "timeseries"
+        }
+      ]
+    },
+    {
+      "collapsed": true,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 66 },
+      "id": 106,
+      "title": "Process Resources",
+      "type": "row",
+      "panels": [
+        {
+          "datasource": { "type": "prometheus", "uid": "arl-prometheus" },
+          "fieldConfig": {
+            "defaults": { "color": { "mode": "palette-classic" }, "unit": "bytes", "custom": { "lineWidth": 2, "fillOpacity": 10 } }
+          },
+          "gridPos": { "h": 8, "w": 12, "x": 0, "y": 67 },
+          "id": 26,
+          "options": { "tooltip": { "mode": "multi" }, "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["lastNotNull"] } },
+          "targets": [
+            { "datasource": { "type": "prometheus", "uid": "arl-prometheus" }, "expr": "process_resident_memory_bytes{job=\"arl\"}", "legendFormat": "RSS {{component}}" },
+            { "datasource": { "type": "prometheus", "uid": "arl-prometheus" }, "expr": "go_memstats_alloc_bytes{job=\"arl\"}", "legendFormat": "heap alloc {{component}}" }
+          ],
+          "title": "Memory Usage",
+          "type": "timeseries"
+        },
+        {
+          "datasource": { "type": "prometheus", "uid": "arl-prometheus" },
+          "fieldConfig": {
+            "defaults": { "color": { "mode": "palette-classic" }, "unit": "short", "custom": { "lineWidth": 2, "fillOpacity": 10 } }
+          },
+          "gridPos": { "h": 8, "w": 12, "x": 12, "y": 67 },
+          "id": 27,
+          "options": { "tooltip": { "mode": "multi" }, "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["lastNotNull"] } },
+          "targets": [
+            { "datasource": { "type": "prometheus", "uid": "arl-prometheus" }, "expr": "rate(process_cpu_seconds_total{job=\"arl\"}[5m])", "legendFormat": "CPU {{component}}" }
+          ],
+          "title": "CPU Usage (cores)",
+          "type": "timeseries"
+        },
+        {
+          "datasource": { "type": "prometheus", "uid": "arl-prometheus" },
+          "fieldConfig": {
+            "defaults": { "color": { "mode": "palette-classic" }, "unit": "short", "custom": { "lineWidth": 2, "fillOpacity": 10 } }
+          },
+          "gridPos": { "h": 8, "w": 12, "x": 0, "y": 75 },
+          "id": 28,
+          "options": { "tooltip": { "mode": "multi" }, "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["lastNotNull"] } },
+          "targets": [
+            { "datasource": { "type": "prometheus", "uid": "arl-prometheus" }, "expr": "go_goroutines{job=\"arl\"}", "legendFormat": "{{component}}" }
+          ],
+          "title": "Goroutines",
+          "type": "timeseries"
+        },
+        {
+          "datasource": { "type": "prometheus", "uid": "arl-prometheus" },
+          "fieldConfig": {
+            "defaults": { "color": { "mode": "palette-classic" }, "unit": "ops", "custom": { "lineWidth": 2, "fillOpacity": 10 } }
+          },
+          "gridPos": { "h": 8, "w": 12, "x": 12, "y": 75 },
+          "id": 29,
+          "options": { "tooltip": { "mode": "multi" }, "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["lastNotNull"] } },
+          "targets": [
+            { "datasource": { "type": "prometheus", "uid": "arl-prometheus" }, "expr": "sum by (code, method) (rate(rest_client_requests_total[5m]))", "legendFormat": "{{method}} {{code}}" }
+          ],
+          "title": "K8s API Request Rate",
+          "type": "timeseries"
+        }
+      ]
     }
   ],
   "refresh": "30s",
