@@ -855,6 +855,237 @@ def exec_bench(
 
 
 # =========================================================================
+# Command: managed-bench
+# =========================================================================
+
+
+@app.command()
+def managed_bench(
+    concurrency: int = typer.Option(
+        32, "--concurrency", "-c", help="Concurrent managed sessions."
+    ),
+    image: str = typer.Option(DEFAULT_IMAGE, "--image", "-i"),
+    namespace: str = typer.Option(DEFAULT_NAMESPACE, "--namespace", "-n"),
+    gateway_url: str = typer.Option(DEFAULT_GATEWAY, "--gateway", "-g"),
+    timeout: float = typer.Option(300.0, "--timeout"),
+    max_replicas: int = typer.Option(
+        0, "--max-replicas", "-m",
+        help="maxReplicas hint (0 = none, server scales incrementally).",
+    ),
+    execute: bool = typer.Option(
+        True, "--execute/--no-execute",
+        help="Run a command in each session after creation.",
+    ),
+    cleanup: bool = typer.Option(
+        True, "--cleanup/--no-cleanup",
+    ),
+    port_forward: bool = typer.Option(
+        True, "--port-forward/--no-port-forward",
+    ),
+) -> None:
+    """Stress-test managed sessions: concurrent creation, scaling, execution.
+
+    Launches N concurrent ManagedSession.create_sandbox() calls to the same
+    image, measuring pool auto-scaling, session creation latency, and
+    optionally per-session execution latency.
+
+    Examples:
+        # 32 concurrent sessions (default)
+        uv run python examples/python/bench_gateway.py managed-bench
+
+        # 128 concurrent with eager scaling hint
+        uv run python examples/python/bench_gateway.py managed-bench -c 128 -m 128
+
+        # 512 concurrent, no execute, no cleanup
+        uv run python examples/python/bench_gateway.py managed-bench \
+            -c 512 --no-execute --no-cleanup
+    """
+    if port_forward:
+        ensure_port_forward(gateway_url, namespace)
+
+    exp_id = f"bench-managed-{int(time.time())}"
+    mr_label = f", maxReplicas={max_replicas}" if max_replicas > 0 else ""
+    console.rule(
+        f"[bold]Managed Session Bench: "
+        f"{concurrency} concurrent{mr_label}"
+    )
+    console.print(f"  experiment: [cyan]{exp_id}[/cyan]")
+    console.print(f"  image: [dim]{image}[/dim]")
+
+    client = GatewayClient(base_url=gateway_url, timeout=timeout)
+
+    # ------------------------------------------------------------------
+    # Phase 1: Concurrent session creation
+    # ------------------------------------------------------------------
+    console.print(
+        f"\n[bold cyan]Phase 1:[/bold cyan] "
+        f"Creating {concurrency} managed sessions concurrently..."
+    )
+
+    create_times: list[float] = []
+    create_errors: list[str] = []
+    session_ids: list[str] = []
+    lock = __import__("threading").Lock()
+
+    mr = max_replicas if max_replicas > 0 else None
+
+    def _create_one(idx: int) -> tuple[int, float, str | None, str | None]:
+        t = Timer()
+        try:
+            with t:
+                info = client.create_managed_session(
+                    image=image,
+                    experiment_id=exp_id,
+                    namespace=namespace,
+                    max_replicas=mr,
+                )
+            return idx, t.ms, info.id, None
+        except Exception as exc:
+            return idx, t.ms, None, str(exc)
+
+    wall = Timer()
+    with wall, ThreadPoolExecutor(max_workers=concurrency) as pool:
+        futures = [pool.submit(_create_one, i) for i in range(concurrency)]
+        done_count = 0
+        for future in as_completed(futures):
+            idx, elapsed, sid, err = future.result()
+            done_count += 1
+            with lock:
+                create_times.append(elapsed)
+                if sid:
+                    session_ids.append(sid)
+                if err:
+                    create_errors.append(err)
+            # Progress every 10% or on errors
+            if done_count % max(1, concurrency // 10) == 0 or err:
+                status = f"[green]{fmt(elapsed)}[/green]"
+                if err:
+                    short = err[:80]
+                    status = f"[red]ERR: {short}[/red]"
+                console.print(
+                    f"  [{done_count}/{concurrency}] {status}"
+                )
+
+    console.print(
+        f"\n  Wall-clock: [bold]{fmt(wall.ms)}[/bold]  "
+        f"OK={len(session_ids)}  "
+        f"Errors={len(create_errors)}"
+    )
+
+    if create_errors:
+        # Show unique error messages
+        unique_errs: dict[str, int] = {}
+        for e in create_errors:
+            # Truncate for grouping
+            key = e[:120]
+            unique_errs[key] = unique_errs.get(key, 0) + 1
+        console.print("\n  [red]Error summary:[/red]")
+        for msg, count in sorted(
+            unique_errs.items(), key=lambda x: -x[1]
+        ):
+            console.print(f"    {count}x  {msg}")
+
+    # ------------------------------------------------------------------
+    # Phase 2: Execute a command in each session
+    # ------------------------------------------------------------------
+    exec_times: list[float] = []
+    exec_errors: list[str] = []
+
+    if execute and session_ids:
+        console.print(
+            f"\n[bold cyan]Phase 2:[/bold cyan] "
+            f"Executing 'echo ok' in {len(session_ids)} sessions..."
+        )
+
+        def _exec_one(
+            sid: str,
+        ) -> tuple[float, str | None]:
+            t = Timer()
+            try:
+                with t:
+                    resp = client.execute(
+                        sid,
+                        [{"name": "bench", "command": ["echo", "ok"]}],
+                    )
+                ec = resp.results[0].output.exit_code if resp.results else -1
+                if ec != 0:
+                    return t.ms, f"exit_code={ec}"
+                return t.ms, None
+            except Exception as exc:
+                return t.ms, str(exc)
+
+        exec_wall = Timer()
+        with exec_wall, ThreadPoolExecutor(
+            max_workers=min(concurrency, 64)
+        ) as pool:
+            futures = [
+                pool.submit(_exec_one, sid) for sid in session_ids
+            ]
+            done_count = 0
+            for future in as_completed(futures):
+                elapsed, err = future.result()
+                done_count += 1
+                with lock:
+                    exec_times.append(elapsed)
+                    if err:
+                        exec_errors.append(err)
+                if done_count % max(1, len(session_ids) // 10) == 0:
+                    console.print(
+                        f"  [{done_count}/{len(session_ids)}]"
+                    )
+
+        console.print(
+            f"\n  Exec wall-clock: [bold]{fmt(exec_wall.ms)}[/bold]  "
+            f"OK={len(exec_times) - len(exec_errors)}  "
+            f"Errors={len(exec_errors)}"
+        )
+
+    # ------------------------------------------------------------------
+    # Results
+    # ------------------------------------------------------------------
+    console.print()
+    rows: list[tuple[str, list[float]]] = [
+        (f"Session create ({concurrency} concurrent)", create_times),
+    ]
+    if exec_times:
+        rows.append(
+            (f"Execute ({len(session_ids)} sessions)", exec_times)
+        )
+    console.print(stats_table("Managed Session Benchmark", rows))
+
+    # Throughput summary
+    if create_times:
+        ok_count = len(session_ids)
+        tput = ok_count / (wall.ms / 1000) if wall.ms > 0 else 0
+        console.print(
+            f"\n  Throughput: [bold green]{tput:.1f}[/bold green] "
+            f"sessions/sec  "
+            f"({ok_count} sessions in {fmt(wall.ms)})"
+        )
+
+    # ------------------------------------------------------------------
+    # Cleanup
+    # ------------------------------------------------------------------
+    if cleanup and session_ids:
+        console.print(
+            f"\n[dim]Cleaning up experiment {exp_id} "
+            f"({len(session_ids)} sessions)...[/dim]"
+        )
+        try:
+            deleted = client.delete_experiment(exp_id)
+            console.print(f"[green]Deleted {deleted} sessions.[/green]")
+        except Exception as exc:
+            console.print(f"[yellow]Cleanup error: {exc}[/yellow]")
+    elif not cleanup:
+        console.print(
+            f"\n[yellow]Skipped cleanup. "
+            f"To clean up later:[/yellow]\n"
+            f"  curl -X DELETE {gateway_url}/v1/managed/"
+            f"experiments/{exp_id}"
+        )
+
+
+# =========================================================================
 # Command: full
 # =========================================================================
 

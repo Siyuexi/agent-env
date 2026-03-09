@@ -162,7 +162,7 @@ func (pm *PoolManager) Recover(ctx context.Context) error {
 		}
 
 		pm.pools.Store(pool.Name, state)
-		log.Printf("Recovered managed pool %s (image=%s, sessions=%d)", pool.Name, image, len(sbList.Items))
+		log.Printf("Recovered pool %s (image=%s, sessions=%d, replicas=%d)", pool.Name, image, activeCount, pool.Spec.Replicas)
 	}
 
 	return nil
@@ -214,7 +214,7 @@ func (pm *PoolManager) AcquireSession(ctx context.Context, req CreateManagedSess
 		state.mu.Lock()
 		state.poolCreated = true
 		state.mu.Unlock()
-		log.Printf("Created managed pool %s for image %s", poolName, image)
+		log.Printf("Created pool %s (image=%s, initReplicas=%d)", poolName, image, pm.config.InitialReplicas)
 	} else {
 		// Pool state exists, but the CRD might still be creating.
 		// Wait briefly for pool creation to finish.
@@ -478,13 +478,16 @@ func (pm *PoolManager) doScaleUp(state *poolState) error {
 			return nil
 		}
 
+		oldReplicas := pool.Spec.Replicas
 		pool.Spec.Replicas = newReplicas
 		if err := pm.k8sClient.Update(context.Background(), pool); err != nil {
 			// RetryOnConflict will re-read and retry on IsConflict errors
 			return err
 		}
 
-		log.Printf("Scaled up managed pool %s to %d replicas (demand=%d, clientMax=%d)", state.poolName, newReplicas, demand, clientMax)
+		log.Printf("Scaled up pool %s (image=%s) %d→%d replicas (sessions=%d, demand=%d, clientMax=%d)",
+			state.poolName, state.image, oldReplicas, newReplicas,
+			state.sessionCount.Load(), demand, clientMax)
 		return nil
 	})
 }
@@ -538,7 +541,7 @@ func (pm *PoolManager) sweep() {
 					log.Printf("Warning: failed to GC managed pool %s: %v", poolName, err)
 				} else {
 					pm.pools.Delete(poolName)
-					log.Printf("GC'd empty managed pool %s (idle for %v)", poolName, time.Since(lastEnd))
+					log.Printf("GC'd empty pool %s (image=%s, idle for %v)", poolName, state.image, time.Since(lastEnd))
 				}
 				return true
 			}
@@ -578,7 +581,7 @@ func (pm *PoolManager) sweep() {
 					state.mu.Lock()
 					state.idleSince = time.Time{}
 					state.mu.Unlock()
-					log.Printf("Scaled down managed pool %s to %d replicas", poolName, desiredReplicas)
+					log.Printf("Scaled down pool %s (image=%s) to %d replicas (sessions=%d)", poolName, state.image, desiredReplicas, activeSessions)
 				}
 			}
 		} else {
